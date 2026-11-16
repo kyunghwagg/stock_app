@@ -1,0 +1,6 @@
+streamlit
+pykrx
+finance-datareader
+opendartreader
+plotly
+pandas
