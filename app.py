@@ -268,13 +268,17 @@ except Exception:
     default_dart_key = ""
 
 with st.sidebar:
-    st.header("🏢 OpenDART 실적 검증 설정")
-    dart_api_key = st.text_input(
-        "OpenDART API Key",
-        value=default_dart_key,
-        type="password",
-        help="발급받은 40자리 인증키를 입력하세요."
-    )
+    st.header("🏢 OpenDART 실적 연동")
+    if default_dart_key:
+        dart_api_key = default_dart_key
+        st.success("✅ DART 공시 시스템 자동 연결됨")
+    else:
+        dart_api_key = st.text_input(
+            "OpenDART API Key 입력",
+            type="password",
+            help="발급받은 40자리 인증키를 입력하세요."
+        )
+
     st.divider()
     st.header("🔍 저평가 스크리너 조건")
     market = st.selectbox("시장 선택", ["KOSPI", "KOSDAQ"])
