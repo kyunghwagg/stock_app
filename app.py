@@ -158,7 +158,7 @@ def check_dart_performance(api_key, ticker):
     except Exception:
         return {"status": "error"}
 
-# 6. 상세 진단 화면 렌더링
+# 6. 상세 진단 화면 렌더링 (세분화 판정 적용)
 def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     fund_data, _ = get_single_fundamental(ticker)
     supply = get_investor_supply(ticker)
@@ -202,65 +202,102 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     ohlcv['Gap_Surge'] = (ohlcv['Open'] >= ohlcv['Prev_Close'] * 1.01) & (ohlcv['Close'] > ohlcv['Open']) & (ohlcv['Volume'] >= ohlcv['Vol_MA20'] * 1.5)
 
     latest = ohlcv.iloc[-1]
+    prev = ohlcv.iloc[-2]
     is_aligned = (latest['MA5'] > latest['MA20'] > latest['MA60'] > latest['MA120'])
+    is_mid_up = (latest['Close'] > latest['MA20']) and (latest['MA20'] > latest['MA60'])
+    is_golden = (prev['MA5'] <= prev['MA20']) and (latest['MA5'] > latest['MA20'])
 
-    reasons = []
-    score = 0
+    # -----------------------------------------------------
+    # [세분화 평가] 1) 기업 체력(펀더멘탈) vs 2) 시장 수급·추세 분리 계산
+    # -----------------------------------------------------
+    fund_reasons = []
+    tech_reasons = []
     is_deficit = False
+    is_earnings_up = False
+    is_undervalued = False
+    is_big_buying = False
 
+    # (1) 실적 판별
     if dart_res["status"] == "success":
         if dart_res['curr_op'] <= 0:
             is_deficit = True
-            reasons.append("❌ 영업이익 적자 기업")
+            fund_reasons.append(f"❌ 영업이익 적자 ({dart_res['period']})")
         elif dart_res['op_diff'] > 0:
-            score += 2
-            reasons.append(f"✅ 영업이익 전년 대비 {dart_res['op_growth']:+.0f}% 증가")
+            is_earnings_up = True
+            fund_reasons.append(f"✅ 영업이익 전년 대비 {dart_res['op_growth']:+.0f}% 성장 ({dart_res['period']})")
         else:
-            score += 1
-            reasons.append("⚠️ 흑자이나 영업이익 감소")
+            fund_reasons.append(f"⚠️ 흑자 유지 중이나 이익 감소 ({dart_res['op_growth']:+.0f}%)")
+    else:
+        fund_reasons.append("ℹ️ 공시 실적 데이터 미확인")
 
+    # (2) 가치(PBR/PER) 판별
     pbr_val = fund_data.get('PBR', 0) if fund_data else 0
+    per_val = fund_data.get('PER', 0) if fund_data else 0
     if 0 < pbr_val <= 1.2:
-        score += 1
-        reasons.append(f"✅ 저평가 상태 (PBR {pbr_val:.2f}배)")
-    elif pbr_val > 3.0:
-        reasons.append(f"⚠️ 주가 고평가 주의 (PBR {pbr_val:.2f}배)")
+        is_undervalued = True
+        fund_reasons.append(f"✅ 자산 대비 저평가 (PBR {pbr_val:.2f}배)")
+    elif 1.2 < pbr_val <= 2.5:
+        fund_reasons.append(f"🆗 적정 주가 수준 (PBR {pbr_val:.2f}배)")
+    elif pbr_val > 2.5:
+        fund_reasons.append(f"⚠️ 고평가 구간 주의 (PBR {pbr_val:.2f}배)")
 
+    # (3) 큰손(기관·외국인) 수급 판별
     if supply:
         big_money = supply['inst'] + supply['frgn']
-        if big_money > 0:
-            score += 1
-            reasons.append("✅ 최근 5일 기관·외국인 매수 유입")
+        if supply['inst'] > 0 and supply['frgn'] > 0:
+            is_big_buying = True
+            tech_reasons.append(f"✅ 기관·외국인 쌍끌이 매수 ({big_money:+,.0f}억)")
+        elif big_money > 0:
+            is_big_buying = True
+            tech_reasons.append(f"✅ 큰손(기관+외인) 순매수 유입 ({big_money:+,.0f}억)")
         else:
-            reasons.append("⚠️ 최근 5일 큰손(기관·외국인) 매도 우위")
+            tech_reasons.append(f"⚠️ 최근 5일 큰손 매도 우위 ({big_money:+,.0f}억)")
 
+    # (4) 차트 추세 및 바닥 신호 판별
     if is_aligned:
-        score += 1
-        reasons.append("✅ 차트 상승 추세(정배열)")
+        tech_reasons.append("✅ 이동평균선 완전 정배열 (강한 상승세)")
+    elif is_mid_up:
+        tech_reasons.append("🆗 20일·60일선 위 우상향 추세 유지")
+    elif latest['Hammer'] or is_golden:
+        tech_reasons.append("🌱 하락 멈춤 및 단기 반등(망치형/골든크로스) 포착")
     else:
-        reasons.append("⏸️ 차트 방향 탐색 중(비정배열)")
+        tech_reasons.append("⏸️ 단기 조정 구간 (이동평균선 아래 숨고르기)")
 
     st.divider()
     st.subheader(f"📌 {stock_name} ({int(latest['Close']):,}원)")
 
+    # -----------------------------------------------------
+    # 4단계 세분화 신호등 종합 배너
+    # -----------------------------------------------------
     if is_deficit:
-        st.error("### 🔴 [위험] 적자 기업 — 피하세요")
-    elif score >= 4:
-        st.success("### 🟢 [안전] 실적·수급 우수 — 분할 매수 검토")
-    elif score >= 2:
-        st.warning("### 🟡 [주의] 일부 조건 부족 — 관망 추천")
+        st.error("### 🔴 [위험 / 회피] 영업이익 적자 기업\n실적이 뒷받침되지 않으므로 추격 매수를 피하세요.")
+    elif is_earnings_up and (is_aligned or is_mid_up) and is_big_buying:
+        st.success("### 🟢 [적극 검토] 실적·수급·추세 3박자 우수\n이익이 늘고 큰손도 매수 중인 건강한 상승 흐름입니다. (분할 매수 검토)")
+    elif is_earnings_up and (is_undervalued or per_val <= 15) and not (is_aligned or is_mid_up):
+        st.info("### 🔵 [조정 시 분할매수 기회] 실적 튼튼·장세 영향 눌림목\n회사는 돈을 잘 벌고 저평가 상태이나, 시장 분위기로 주가만 쉬어가는 중입니다. (천천히 나눠서 매수 검토)")
+    elif (is_aligned or is_mid_up) and is_big_buying and not is_earnings_up:
+        st.warning("### 🟡 [단기 수급주 / 주의] 차트·수급은 좋으나 실적 확인 필요\n큰손 매수세로 오르고 있으나 이익 성장이 약합니다. -10% 손절선을 꼭 지키세요.")
     else:
-        st.error("### 🔴 [위험] 수급·추세 약함 — 신중 접근")
+        st.warning("### 🟡 [관망 추천] 추세 및 수급 회복 대기\n아직 큰손 수급이나 상승 추세가 확실히 자리 잡지 않았습니다. 바닥 확인 후 접근하세요.")
 
-    for r in reasons:
-        st.markdown(f"**{r}**")
+    # 근거 항목을 [기업 체력]과 [차트·수급] 2단으로 깔끔하게 분리 출력
+    c_f, c_t = st.columns(2)
+    with c_f:
+        st.markdown("**🏢 기업 체력 (실적·가치)**")
+        for r in fund_reasons:
+            st.markdown(f"- {r}")
+    with c_t:
+        st.markdown("**📊 시장 분위기 (수급·차트)**")
+        for r in tech_reasons:
+            st.markdown(f"- {r}")
 
+    # [중단] 핵심 숫자 3개 표시
     st.divider()
     m1, m2, m3 = st.columns(3)
     if dart_res["status"] == "success":
         m1.metric("최근 영업이익", f"{dart_res['curr_op']/100_000_000:,.0f} 억", f"{dart_res['op_growth']:+.1f}%")
     else:
-        m1.metric("PER (수익비율)", f"{fund_data.get('PER', 0):.1f} 배" if fund_data else "-")
+        m1.metric("PER (수익비율)", f"{per_val:.1f} 배" if per_val > 0 else "-")
 
     if supply:
         m2.metric("기관+외국인(5일)", f"{supply['inst']+supply['frgn']:+,.0f} 억")
@@ -269,6 +306,7 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
 
     m3.metric("PBR (1이하면 저평가)", f"{pbr_val:.2f} 배" if pbr_val > 0 else "-")
 
+    # [하단] 일봉 + 이동평균선 차트
     fig = go.Figure()
     candle = go.Candlestick(
         x=ohlcv.index, open=ohlcv['Open'], high=ohlcv['High'], low=ohlcv['Low'], close=ohlcv['Close'],
@@ -342,16 +380,4 @@ with tab1:
 with tab2:
     c1, c2 = st.columns(2)
     market_sel = c1.selectbox("시장", ["KOSPI", "KOSDAQ"])
-    min_amt = c2.selectbox("거래대금 기준", [300, 500, 1000], format_func=lambda x: f"{x}억 이상")
-
-    df_cond, bday_str = run_condition_screener(market_sel, min_amt, 0.5, 2.5)
-    st.caption(f"기준일: {bday_str} (거품 없는 저PBR + 거래대금 급증 종목)")
-
-    if df_cond.empty:
-        st.info("해외 클라우드 서버에서 거래소 일괄 조회가 일시 제한되었거나 조건에 맞는 종목이 없습니다. 첫 번째 [🔍 종목 검색] 탭을 이용해 주세요!")
-    else:
-        st.dataframe(df_cond, use_container_width=True, height=220)
-        sel_cond_name = st.selectbox("자세히 볼 종목 선택", df_cond['종목명'].tolist())
-        if sel_cond_name:
-            t_code = df_cond[df_cond['종목명'] == sel_cond_name].index[0]
-            render_stock_analysis(t_code, sel_cond_name, dart_api_key, tab_id="screener")
+    min_amt = c2.selectbox("거래대금 기준", [300, 500, 1000], format_
