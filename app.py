@@ -6,117 +6,142 @@ import OpenDartReader
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="주식 아가방 차트 & 저평가 스크리너", layout="wide")
-st.title("📈 실적·저평가 종목 스크리너 & 차트 분석기")
+st.set_page_config(page_title="아버지 전용 주식 아가방 & 수급/차트 검색기", layout="wide")
+st.title("📈 [실적 + 수급 + 차트] 안전 종목 검색기")
 
 # ---------------------------------------------------------
-# 0. 대시보드 내장 실전 투자 판단 가이드
+# 0. 실전 투자 판단 가이드
 # ---------------------------------------------------------
-with st.expander("📖 [주식 아가방 & 12시에 만나요] 실전 차트·재무 판단 가이드 (클릭하여 열기)", expanded=False):
+with st.expander("📖 [주식 아가방 & 수급·차트] 안전 투자 가이드 (클릭하여 열기)", expanded=False):
     g1, g2, g3, g4 = st.columns(4)
     with g1:
         st.info(
-            "**1️⃣ 가치 & 실적 먼저 확인**\n\n"
-            "차트보다 숫자가 먼저입니다. **PBR 1.0 이하·저PER**이면서 "
-            "DART 분기 보고서상 **영업이익이 전년 대비 증가**한 억울한 저평가주를 찾습니다."
+            "**1️⃣ 실적 & 가치 안전장치**\n\n"
+            "차트 신호가 떠도 적자 기업은 피합니다. **PBR·PER이 적정**하고 "
+            "**DART 영업이익이 흑자·성장**인 기업만 선별합니다."
         )
     with g2:
         st.success(
-            "**2️⃣ 일봉(캔들)의 의미**\n\n"
-            "하루 동안의 매수·매도 전쟁 기록입니다.\n"
-            "- 🔴 **양봉:** 시가보다 종가가 상승\n"
-            "- 🔵 **음봉:** 시가보다 종가가 하락\n"
-            "- **꼬리:** 장중 변동성(몸통보다 중요)"
+            "**2️⃣ 진짜 큰손(기관·외국인) 수급**\n\n"
+            "개인이 띄우는 급등주는 위험합니다. 최근 5거래일간 **기관(연기금 등)과 외국인이 실제 순매수**하는 종목을 확인합니다."
         )
     with g3:
         st.warning(
-            "**3️⃣ 망치형(Hammer) 캔들**\n\n"
-            "몸통 아래로 긴 꼬리가 달린 모양(▲)입니다. "
-            "장중 크게 밀렸으나 매수 세력이 종가까지 끌어올린 흔적으로, **바닥 지지선 형성** 신호로 봅니다."
+            "**3️⃣ 갭상승 & 거래대금 신호**\n\n"
+            "전일 종가보다 시가가 강하게 출발(갭상승)하고 **거래대금이 터지며 이동평균선 정배열**을 유지할 때 추세가 살아납니다."
         )
     with g4:
         st.error(
-            "**4️⃣ 이동평균선 & 대응 원칙**\n\n"
-            "- **정배열(5>20>60>120일):** 건강한 상승 추세\n"
-            "- **골든크로스:** 단기선이 장기선을 상향 돌파\n"
-            "- **대응:** 분할 매수 후 이유 훼손 또는 지수 대비 **-10% 이탈 시 기계적 손절**"
+            "**4️⃣ 분할 매수 & -10% 손절 원칙**\n\n"
+            "신호 화살표가 떠도 한 번에 다 사지 않고 **나눠서 매수**하며, "
+            "매수가 대비 **-10% 이탈 시 기계적으로 손절**해 원금을 지킵니다."
         )
 
 # ---------------------------------------------------------
-# 1. 전체 상장 종목 마스터(이름 <-> 코드 매핑용) 불러오기
+# 1. 전체 상장 종목 마스터 불러오기
 # ---------------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_all_tickers():
     try:
         df_krx = fdr.StockListing('KRX')
-        # 일반 주식 종목만 필터링 (6자리 코드)
         df_krx = df_krx[df_krx['Code'].str.len() == 6][['Code', 'Name', 'Market']]
         return df_krx
     except Exception:
         return pd.DataFrame(columns=['Code', 'Name', 'Market'])
 
 # ---------------------------------------------------------
-# 2. KRX 전종목 저평가 스크리닝 함수
+# 2. 최근 영업일 탐색 헬퍼
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
-def get_undervalued_stocks(market="KOSPI", max_pbr=1.0, max_per=12.0):
-    df_fund = pd.DataFrame()
-    bday = ""
-    
+def get_latest_bday():
     for i in range(10):
         target_dt = (datetime.today() - timedelta(days=i)).strftime("%Y%m%d")
         try:
-            temp_fund = stock.get_market_fundamental(target_dt, market=market)
-            if not temp_fund.empty and temp_fund['PER'].sum() > 0:
-                df_fund = temp_fund
-                bday = target_dt
-                break
+            temp = stock.get_market_ohlcv(target_dt, market="KOSPI")
+            if not temp.empty and temp['거래대금'].sum() > 0:
+                return target_dt
         except Exception:
             continue
-
-    if not df_fund.empty:
-        df_cap = stock.get_market_cap(bday, market=market)
-        df = df_fund.join(df_cap[['종가', '거래량', '시가총액']])
-        df['종목명'] = [stock.get_market_ticker_name(t) for t in df.index]
-        
-        cond = (
-            (df['PBR'] > 0) & (df['PBR'] <= max_pbr) &
-            (df['PER'] > 0) & (df['PER'] <= max_per) &
-            (df['거래량'] > 100000)
-        )
-        filtered = df[cond].sort_values(by='PBR', ascending=True)
-        return filtered[['종목명', '종가', 'PER', 'PBR', 'DIV', '거래량', '시가총액']], bday, "KRX"
-    else:
-        df_krx = fdr.StockListing(market)
-        df_krx = df_krx.set_index('Code')
-        df_krx = df_krx.rename(columns={'Name': '종목명', 'Close': '종가', 'Volume': '거래량', 'Marcap': '시가총액'})
-        filtered = df_krx[df_krx['거래량'] > 100000].sort_values(by='시가총액', ascending=False).head(100)
-        return filtered[['종목명', '종가', '거래량', '시가총액']], datetime.today().strftime("%Y%m%d"), "FDR"
+    return datetime.today().strftime("%Y%m%d")
 
 # ---------------------------------------------------------
-# 3. 개별 종목의 최신 PER·PBR 조회 함수
+# 3. [조건검색기] 거래대금 + 시가 갭상승 + 저평가 스크리닝
+# ---------------------------------------------------------
+@st.cache_data(ttl=1800)
+def run_condition_screener(market="KOSPI", min_amt_uk=300, min_gap_pct=1.0, max_pbr=3.0):
+    bday = get_latest_bday()
+    try:
+        df_ohlcv = stock.get_market_ohlcv(bday, market=market)
+        df_fund = stock.get_market_fundamental(bday, market=market)
+        
+        if df_ohlcv.empty:
+            return pd.DataFrame(), bday
+
+        df = df_ohlcv.join(df_fund[['PER', 'PBR', 'DIV']], how='left')
+        df['종목명'] = [stock.get_market_ticker_name(t) for t in df.index]
+        
+        # 전일 종가 역산: 종가 / (1 + 등락률/100)
+        df['전일종가'] = df['종가'] / (1 + df['등락률'] / 100)
+        df['시가갭(%)'] = ((df['시가'] - df['전일종가']) / df['전일종가']) * 100
+        df['거래대금(억)'] = (df['거래대금'] / 100_000_000).round(0)
+        
+        # 조건 필터링: 거래대금(억) 이상 & 시가 갭상승(%) 이상 & PBR 이하
+        cond = (
+            (df['거래대금(억)'] >= min_amt_uk) &
+            (df['시가갭(%)'] >= min_gap_pct) &
+            (df['PBR'].fillna(0) <= max_pbr)
+        )
+        res = df[cond].sort_values(by='거래대금(억)', ascending=False)
+        cols = ['종목명', '종가', '등락률', '시가갭(%)', '거래대금(억)', 'PER', 'PBR', 'DIV']
+        res['등락률'] = res['등락률'].round(2)
+        res['시가갭(%)'] = res['시가갭(%)'].round(2)
+        return res[cols], bday
+    except Exception:
+        return pd.DataFrame(), bday
+
+# ---------------------------------------------------------
+# 4. 개별 종목 기관·외국인 최근 5일 수급 조회
+# ---------------------------------------------------------
+@st.cache_data(ttl=1800)
+def get_investor_supply(ticker):
+    end_dt = get_latest_bday()
+    start_dt = (datetime.strptime(end_dt, "%Y%m%d") - timedelta(days=12)).strftime("%Y%m%d")
+    try:
+        df_inv = stock.get_market_trading_value_by_date(start_dt, end_dt, ticker)
+        if df_inv.empty:
+            return None
+        recent_5 = df_inv.tail(5)
+        inst_sum = recent_5['기관합계'].sum() / 100_000_000  # 억원
+        frgn_sum = recent_5['외국인합계'].sum() / 100_000_000 # 억원
+        indiv_sum = recent_5['개인'].sum() / 100_000_000     # 억원
+        return {
+            "inst": inst_sum,
+            "frgn": frgn_sum,
+            "indiv": indiv_sum,
+            "days": len(recent_5)
+        }
+    except Exception:
+        return None
+
+# ---------------------------------------------------------
+# 5. 개별 종목 PER·PBR 및 OpenDART 실적 검증
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_single_fundamental(ticker):
-    for i in range(10):
-        target_dt = (datetime.today() - timedelta(days=i)).strftime("%Y%m%d")
-        try:
-            df = stock.get_market_fundamental(target_dt, target_dt, ticker)
-            if not df.empty and df['PER'].iloc[0] > 0:
-                return df.iloc[0].to_dict(), target_dt
-        except Exception:
-            continue
-    return None, ""
+    bday = get_latest_bday()
+    try:
+        df = stock.get_market_fundamental(bday, bday, ticker)
+        if not df.empty:
+            return df.iloc[0].to_dict(), bday
+    except Exception:
+        pass
+    return None, bday
 
-# ---------------------------------------------------------
-# 4. OpenDART 분기/결산 영업이익·매출액 성장 여부 검증 함수
-# ---------------------------------------------------------
 @st.cache_data(ttl=86400)
 def check_dart_performance(api_key, ticker):
     try:
         dart = OpenDartReader(api_key)
         current_year = datetime.today().year
-        
         reports = [
             (current_year, '11014', '3분기'),
             (current_year, '11012', '반기'),
@@ -124,12 +149,10 @@ def check_dart_performance(api_key, ticker):
             (current_year - 1, '11011', '연간결산'),
             (current_year - 1, '11014', '전년 3분기'),
         ]
-        
         for yr, reprt_code, label in reports:
             fs = dart.finstate(ticker, yr, reprt_code=reprt_code)
             if fs is None or fs.empty:
                 continue
-            
             fs_sub = fs[fs['fs_div'] == 'CFS']
             if fs_sub.empty:
                 fs_sub = fs[fs['fs_div'] == 'OFS']
@@ -167,49 +190,55 @@ def check_dart_performance(api_key, ticker):
         return {"status": "error", "msg": f"DART 조회 오류: {e}"}
 
 # ---------------------------------------------------------
-# 5. 공통 종목 상세 분석 화면 렌더링 함수 (실적 + 차트)
+# 6. 종목 상세 분석 화면 렌더링 (실적 + 기관/외인 수급 + 신호 화살표 차트)
 # ---------------------------------------------------------
 def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     st.divider()
-    st.subheader(f"🔎 [{stock_name} ({ticker})] 정밀 분석 결과")
+    st.subheader(f"🔎 [{stock_name} ({ticker})] 종합 안전 진단")
     
-    # [A] 기본 가치 지표 (PER, PBR, 배당수익률)
-    fund_data, f_date = get_single_fundamental(ticker)
-    if fund_data:
-        st.caption(f"KRX 기준일: {f_date}")
-        f1, f2, f3 = st.columns(3)
-        f1.metric("PER (주가수익비율)", f"{fund_data.get('PER', 0):.2f} 배")
-        f2.metric("PBR (주가순자산비율)", f"{fund_data.get('PBR', 0):.2f} 배")
-        f3.metric("배당수익률", f"{fund_data.get('DIV', 0):.2f} %")
+    # [A] 가치 지표 (PER, PBR) & 기관/외국인 수급 ('큰형님 수급' 검증)
+    c_left, c_right = st.columns(2)
+    
+    with c_left:
+        st.markdown("#### 💎 1. 가치 평가 (KRX 공식)")
+        fund_data, f_date = get_single_fundamental(ticker)
+        if fund_data:
+            f1, f2, f3 = st.columns(3)
+            f1.metric("PER (수익비율)", f"{fund_data.get('PER', 0):.2f} 배")
+            f2.metric("PBR (자산비율)", f"{fund_data.get('PBR', 0):.2f} 배")
+            f3.metric("배당수익률", f"{fund_data.get('DIV', 0):.2f} %")
+        else:
+            st.info("가치 지표 데이터 조회 중")
+
+    with c_right:
+        st.markdown("#### 🏦 2. 최근 5일 큰손(기관·외국인) 수급")
+        supply = get_investor_supply(ticker)
+        if supply:
+            s1, s2, s3 = st.columns(3)
+            s1.metric("기관 순매수", f"{supply['inst']:+,.1f} 억", delta="매수 우위" if supply['inst'] > 0 else "매도 우위")
+            s2.metric("외국인 순매수", f"{supply['frgn']:+,.1f} 억", delta="매수 우위" if supply['frgn'] > 0 else "매도 우위")
+            s3.metric("개인 순매수", f"{supply['indiv']:+,.1f} 억")
+        else:
+            st.info("수급 데이터를 불러올 수 없습니다.")
 
     # [B] OpenDART 최근 실적 검증
     if dart_api_key:
-        with st.spinner(f"DART에서 {stock_name}의 최신 분기 재무제표를 확인하는 중..."):
-            res = check_dart_performance(dart_api_key, ticker)
-            
+        res = check_dart_performance(dart_api_key, ticker)
         if res["status"] == "success":
-            st.markdown(f"#### 📊 최신 공시 실적 점검 ({res['period']} 기준)")
+            st.markdown(f"#### 📊 3. 최신 공시 실적 점검 ({res['period']} 기준)")
             d1, d2, d3 = st.columns(3)
-            curr_op_uk = res['curr_op'] / 100_000_000
-            prev_op_uk = res['prev_op'] / 100_000_000
-            curr_rev_uk = res['curr_rev'] / 100_000_000
-            
-            d1.metric("영업이익 (당기)", f"{curr_op_uk:,.1f} 억원", delta=f"전년 동기 대비 {res['op_growth']:+.1f}%")
-            d2.metric("전년 동기 영업이익", f"{prev_op_uk:,.1f} 억원")
-            d3.metric("매출액 (당기)", f"{curr_rev_uk:,.1f} 억원", delta=f"전년 동기 대비 {res['rev_growth']:+.1f}%")
+            d1.metric("영업이익 (당기)", f"{res['curr_op']/100_000_000:,.1f} 억원", delta=f"전년 대비 {res['op_growth']:+.1f}%")
+            d2.metric("전년 동기 영업이익", f"{res['prev_op']/100_000_000:,.1f} 억원")
+            d3.metric("매출액 (당기)", f"{res['curr_rev']/100_000_000:,.1f} 억원", delta=f"전년 대비 {res['rev_growth']:+.1f}%")
             
             if res['curr_op'] > 0 and res['op_diff'] > 0:
-                st.success(f"✅ **실적 합격:** {res['period']} 영업이익이 작년보다 **{res['op_growth']:.1f}% 증가**한 흑자 성장 기업입니다.")
-            elif res['curr_op'] > 0 and res['op_diff'] <= 0:
-                st.warning(f"⚠️ **주의:** 흑자는 유지 중이나 전년 동기 대비 영업이익이 감소({res['op_growth']:.1f}%)했습니다.")
+                st.success(f"✅ **실적 합격:** {res['period']} 영업이익이 작년보다 **{res['op_growth']:.1f}% 증가**한 흑자 기업입니다.")
+            elif res['curr_op'] > 0:
+                st.warning(f"⚠️ **주의:** 흑자이나 전년 대비 영업이익이 감소({res['op_growth']:.1f}%)했습니다.")
             else:
-                st.error("❌ **적자 주의:** 해당 분기 영업이익이 적자 상태입니다.")
-        else:
-            st.info(res["msg"])
-    else:
-        st.caption("💡 좌측 사이드바에 OpenDART API Key를 입력하면 최근 분기 영업이익 성장 여부를 자동 검증합니다.")
+                st.error("❌ **적자 주의:** 영업이익이 적자 상태이므로 추격 매수를 피하세요.")
 
-    # [C] 일봉 차트 및 이동평균선 분석
+    # [C] 일봉 차트 + 신호 화살표 (수식관리자 대체)
     end_dt = datetime.today()
     start_dt = end_dt - timedelta(days=250)
     ohlcv = fdr.DataReader(ticker, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
@@ -221,22 +250,32 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     for ma in [5, 20, 60, 120]:
         ohlcv[f'MA{ma}'] = ohlcv['Close'].rolling(window=ma).mean()
         
+    # 신호 1: 망치형 지지 캔들
     body = (ohlcv['Close'] - ohlcv['Open']).abs()
     lower_shadow = ohlcv[['Open', 'Close']].min(axis=1) - ohlcv['Low']
     upper_shadow = ohlcv['High'] - ohlcv[['Open', 'Close']].max(axis=1)
     ohlcv['Hammer'] = (lower_shadow >= body * 2) & (upper_shadow <= body * 0.5) & (body > 0)
+    
+    # 신호 2: 갭상승 + 거래량 급증 양봉 (수급 돌파 화살표)
+    ohlcv['Prev_Close'] = ohlcv['Close'].shift(1)
+    ohlcv['Vol_MA20'] = ohlcv['Volume'].rolling(window=20).mean()
+    ohlcv['Gap_Surge'] = (
+        (ohlcv['Open'] >= ohlcv['Prev_Close'] * 1.01) & # 시가 1% 이상 갭상승
+        (ohlcv['Close'] > ohlcv['Open']) &              # 양봉 마감
+        (ohlcv['Volume'] >= ohlcv['Vol_MA20'] * 1.5)    # 20일 평균 거래량 1.5배 이상
+    )
 
     latest = ohlcv.iloc[-1]
     prev = ohlcv.iloc[-2]
     is_aligned = (latest['MA5'] > latest['MA20'] > latest['MA60'] > latest['MA120'])
     is_golden = (prev['MA5'] <= prev['MA20']) and (latest['MA5'] > latest['MA20'])
 
-    st.markdown("#### 🕯️ 차트 기술적 신호 진단")
+    st.markdown("#### 🕯️ 4. 차트 추세 & 매수 신호 진단")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("현재가 (최근 종가)", f"{int(latest['Close']):,} 원")
     col2.metric("이동평균선 배열", "정배열 (상승추세)" if is_aligned else "비정배열")
     col3.metric("단기 추세 신호", "골든크로스 발생!" if is_golden else "특이신호 없음")
-    col4.metric("최근 망치형 캔들", "포착됨 (지지선 확인)" if latest['Hammer'] else "해당 없음")
+    col4.metric("최근 망치형/돌파신호", "포착됨" if (latest['Hammer'] or latest['Gap_Surge']) else "해당 없음")
 
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
@@ -249,18 +288,27 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     for ma, color in colors.items():
         fig.add_trace(go.Scatter(x=ohlcv.index, y=ohlcv[ma], mode='lines', name=ma, line=dict(color=color, width=1.5)))
 
+    # 망치형 지지 마커
     hammers = ohlcv[ohlcv['Hammer']]
     fig.add_trace(go.Scatter(
         x=hammers.index, y=hammers['Low'] * 0.98,
-        mode='markers', name='망치형(지지신호)',
-        marker=dict(symbol='triangle-up', size=10, color='black')
+        mode='markers', name='망치형(바닥지지)',
+        marker=dict(symbol='triangle-up', size=10, color='green')
     ))
 
-    fig.update_layout(xaxis_rangeslider_visible=False, height=550, title=f"{stock_name} ({ticker}) 일봉 & 이동평균선 차트")
+    # 갭상승+거래량 돌파 화살표 마커 (HTS 수식 신호 대체)
+    surges = ohlcv[ohlcv['Gap_Surge']]
+    fig.add_trace(go.Scatter(
+        x=surges.index, y=surges['Low'] * 0.96,
+        mode='markers', name='갭상승+수급돌파 신호',
+        marker=dict(symbol='triangle-up', size=13, color='red')
+    ))
+
+    fig.update_layout(xaxis_rangeslider_visible=False, height=550, title=f"{stock_name} ({ticker}) 일봉 & 신호 화살표 차트")
     st.plotly_chart(fig, use_container_width=True, key=f"chart_{tab_id}_{ticker}")
 
 # ---------------------------------------------------------
-# 사이드바 설정 (Secrets에 키가 있으면 자동 로드)
+# 사이드바 설정
 # ---------------------------------------------------------
 try:
     default_dart_key = st.secrets.get("DART_API_KEY", "")
@@ -273,55 +321,39 @@ with st.sidebar:
         dart_api_key = default_dart_key
         st.success("✅ DART 공시 시스템 자동 연결됨")
     else:
-        dart_api_key = st.text_input(
-            "OpenDART API Key 입력",
-            type="password",
-            help="발급받은 40자리 인증키를 입력하세요."
-        )
-
-    st.divider()
-    st.header("🔍 저평가 스크리너 조건")
-    market = st.selectbox("시장 선택", ["KOSPI", "KOSDAQ"])
-    max_pbr = st.slider("최대 PBR (배)", 0.2, 3.0, 1.0, 0.1)
-    max_per = st.slider("최대 PER (배)", 3.0, 30.0, 12.0, 1.0)
+        dart_api_key = st.text_input("OpenDART API Key 입력", type="password")
 
 # ---------------------------------------------------------
-# 메인 탭 구성: [특정 종목 직접 검색] vs [저평가 종목 리스트]
+# 메인 탭 구성
 # ---------------------------------------------------------
-tab1, tab2 = st.tabs(["🔍 특정 종목 직접 검색 (전종목)", "📋 저평가 후보 리스트"])
+tab1, tab2 = st.tabs(["🔍 특정 종목 직접 검색 (실적·수급·차트)", "⚡ 조건검색기 (거래대금·시가갭·저평가)"])
 
 with tab1:
-    st.markdown("궁금한 종목명을 입력하거나 선택하면 **실적(DART) + 가치(PER/PBR) + 차트 흐름**을 바로 조회합니다.")
+    st.markdown("궁금한 종목명을 입력하면 **실적(DART) + 기관/외국인 수급 + 차트 신호 화살표**를 한 번에 보여줍니다.")
     all_tickers = get_all_tickers()
-    
     if not all_tickers.empty:
-        # '삼성전자 (005930)' 형태로 선택 옵션 생성 (타이핑 자동완성 지원)
         all_tickers['Display'] = all_tickers['Name'] + " (" + all_tickers['Code'] + " / " + all_tickers['Market'] + ")"
         options = all_tickers['Display'].tolist()
-        
-        # 기본값으로 삼성전자 찾기
         default_idx = next((i for i, s in enumerate(options) if s.startswith("삼성전자 (")), 0)
-        selected_display = st.selectbox("종목명 또는 종목코드를 입력하세요 (타이핑 검색 가능)", options, index=default_idx)
-        
+        selected_display = st.selectbox("종목명 또는 종목코드를 입력하세요 (타이핑 검색)", options, index=default_idx)
         if selected_display:
             sel_row = all_tickers[all_tickers['Display'] == selected_display].iloc[0]
             render_stock_analysis(sel_row['Code'], sel_row['Name'], dart_api_key, tab_id="search")
-    else:
-        # 마스터 목록 로드 실패 시 직접 6자리 코드 입력
-        direct_code = st.text_input("종목코드 6자리를 직접 입력하세요 (예: 005930)", value="005930")
-        if len(direct_code.strip()) == 6:
-            render_stock_analysis(direct_code.strip(), direct_code.strip(), dart_api_key)
 
 with tab2:
-    df_list, base_date, source = get_undervalued_stocks(market, max_pbr, max_per)
-    if source == "FDR":
-        st.warning("⚠️ 현재 KRX 서버의 PER/PBR 직접 조회가 제한되어 거래량 상위 주요 종목 리스트로 대체 표시됩니다.")
+    st.markdown("거래대금이 충분히 터지면서 시초가 갭상승이 나온 종목 중, **고평가 거품(PBR)을 걸러낸 안전한 후보군**입니다.")
+    c1, c2, c3, c4 = st.columns(4)
+    market_sel = c1.selectbox("시장 선택", ["KOSPI", "KOSDAQ"])
+    min_amt = c2.number_input("최소 거래대금 (억 원)", min_value=10, max_value=5000, value=300, step=50)
+    min_gap = c3.slider("최소 시초가 갭상승 (%)", -2.0, 10.0, 0.5, 0.5)
+    max_pbr_val = c4.slider("최대 PBR 제한 (배)", 0.5, 10.0, 2.5, 0.5)
 
-    st.subheader(f"{market} 저평가 후보 리스트 (기준일: {base_date} / 총 {len(df_list)}개)")
-    st.dataframe(df_list, use_container_width=True, height=280)
+    df_cond, bday_str = run_condition_screener(market_sel, min_amt, min_gap, max_pbr_val)
+    st.subheader(f"📋 검색 결과 (기준일: {bday_str} / 총 {len(df_cond)}종목)")
+    st.dataframe(df_cond, use_container_width=True, height=280)
 
-    if not df_list.empty:
-        selected_name = st.selectbox("위 리스트에서 분석할 종목 선택", df_list['종목명'].tolist())
-        if selected_name:
-            ticker = df_list[df_list['종목명'] == selected_name].index[0]
-            render_stock_analysis(ticker, selected_name, dart_api_key, tab_id="list")
+    if not df_cond.empty:
+        sel_cond_name = st.selectbox("위 검색 결과에서 정밀 진단할 종목 선택", df_cond['종목명'].tolist())
+        if sel_cond_name:
+            t_code = df_cond[df_cond['종목명'] == sel_cond_name].index[0]
+            render_stock_analysis(t_code, sel_cond_name, dart_api_key, tab_id="screener")
