@@ -14,7 +14,6 @@ st.title("📈 안전 주식 분석기")
 # ---------------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_all_tickers():
-    # 1순위: FinanceDataReader KRX
     try:
         df_krx = fdr.StockListing('KRX')
         if not df_krx.empty and 'Code' in df_krx.columns:
@@ -23,7 +22,6 @@ def get_all_tickers():
     except Exception:
         pass
 
-    # 2순위: FinanceDataReader KRX-DESC
     try:
         df_desc = fdr.StockListing('KRX-DESC')
         if not df_desc.empty and 'Code' in df_desc.columns:
@@ -32,7 +30,6 @@ def get_all_tickers():
     except Exception:
         pass
 
-    # 3순위: pykrx 전체 티커 목록
     try:
         rows = []
         for mkt in ["KOSPI", "KOSDAQ"]:
@@ -43,7 +40,6 @@ def get_all_tickers():
     except Exception:
         pass
 
-    # 4순위: 모두 실패 시 기본 대표 종목 제공
     fallback = [
         {"Code": "005930", "Name": "삼성전자"},
         {"Code": "000660", "Name": "SK하이닉스"},
@@ -242,6 +238,7 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
         (ohlcv['Volume'] >= ohlcv['Vol_MA20'] * 1.5)
     )
 
+    latest = ohlcv.iloc[-1]
     is_aligned = (latest['MA5'] > latest['MA20'] > latest['MA60'] > latest['MA120'])
 
     # [최상단] 신호등 종합 판정 계산
@@ -316,112 +313,4 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     fig = go.Figure()
     fig.add_trace(
         go.Candlestick(
-            x=ohlcv.index,
-            open=ohlcv['Open'],
-            high=ohlcv['High'],
-            low=ohlcv['Low'],
-            close=ohlcv['Close'],
-            name='일봉',
-            increasing_line_color='red',
-            decreasing_line_color='blue'
-        )
-    )
-
-    colors = {'MA5': 'green', 'MA20': 'orange', 'MA60': 'purple', 'MA120': 'gray'}
-    for ma, color in colors.items():
-        fig.add_trace(
-            go.Scatter(
-                x=ohlcv.index,
-                y=ohlcv[ma],
-                mode='lines',
-                name=ma,
-                line=dict(color=color, width=1.5)
-            )
-        )
-
-    hammers = ohlcv[ohlcv['Hammer']]
-    fig.add_trace(
-        go.Scatter(
-            x=hammers.index,
-            y=hammers['Low'] * 0.98,
-            mode='markers',
-            name='바닥지지(망치형)',
-            marker=dict(symbol='triangle-up', size=11, color='green')
-        )
-    )
-
-    surges = ohlcv[ohlcv['Gap_Surge']]
-    fig.add_trace(
-        go.Scatter(
-            x=surges.index,
-            y=surges['Low'] * 0.96,
-            mode='markers',
-            name='수급돌파 신호',
-            marker=dict(symbol='triangle-up', size=14, color='red')
-        )
-    )
-
-    fig.update_layout(
-        xaxis_rangeslider_visible=False,
-        height=420,
-        margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig, use_container_width=True, key=f"chart_{tab_id}_{ticker}")
-    st.caption("▲ 빨간 세모: 거래량 동반 돌파 신호 / ▲ 초록 세모: 바닥 지지 신호")
-
-# ---------------------------------------------------------
-# 사이드바 설정 (Secrets 자동 연결)
-# ---------------------------------------------------------
-try:
-    default_dart_key = st.secrets.get("DART_API_KEY", "")
-except Exception:
-    default_dart_key = ""
-
-with st.sidebar:
-    st.header("⚙️ 설정")
-    if default_dart_key:
-        dart_api_key = default_dart_key
-        st.success("✅ 공시 데이터 자동 연결됨")
-    else:
-        dart_api_key = st.text_input("OpenDART API Key", type="password")
-
-# ---------------------------------------------------------
-# 메인 화면 탭 (무조건 출력되도록 보장)
-# ---------------------------------------------------------
-tab1, tab2 = st.tabs(["🔍 종목 검색", "⚡ 오늘의 수급주"])
-
-with tab1:
-    all_tickers = get_all_tickers()
-    all_tickers['Display'] = all_tickers['Name'] + " (" + all_tickers['Code'] + ")"
-    options = all_tickers['Display'].tolist()
-    default_idx = next((i for i, s in enumerate(options) if s.startswith("삼성전자 (")), 0)
-    
-    selected_display = st.selectbox("회사 이름을 선택하거나 입력하세요", options, index=default_idx)
-    custom_code = st.text_input("또는 6자리 종목코드 직접 입력 (예: 493260)", value="")
-    
-    if custom_code.strip() and len(custom_code.strip()) == 6:
-        code_input = custom_code.strip()
-        matched = all_tickers[all_tickers['Code'] == code_input]
-        s_name = matched['Name'].iloc[0] if not matched.empty else code_input
-        render_stock_analysis(code_input, s_name, dart_api_key, tab_id="search_custom")
-    elif selected_display:
-        sel_row = all_tickers[all_tickers['Display'] == selected_display].iloc[0]
-        render_stock_analysis(sel_row['Code'], sel_row['Name'], dart_api_key, tab_id="search")
-
-with tab2:
-    c1, c2 = st.columns(2)
-    market_sel = c1.selectbox("시장", ["KOSPI", "KOSDAQ"])
-    min_amt = c2.selectbox("거래대금 기준", [300, 500, 1000], format_func=lambda x: f"{x}억 이상")
-
-    df_cond, bday_str = run_condition_screener(market_sel, min_amt, 0.5, 2.5)
-    st.caption(f"기준일: {bday_str} (거품 없는 저PBR + 거래대금 급증 종목)")
-    
-    if df_cond.empty:
-        st.info("해외 클라우드 서버에서 거래소 일괄 조회가 일시 제한되었거나 조건에 맞는 종목이 없습니다. 첫 번째 [🔍 종목 검색] 탭을 이용해 주세요!")
-    else:
-        st.dataframe(df_cond, use_container_width=True, height=220)
-        sel_cond_name = st.selectbox("자세히 볼 종목 선택", df_cond['종목명'].tolist())
-        if sel_cond_name:
-            t_code = df_cond[df_cond['종목명'] == sel_cond_name].index[0]
-            render_stock_analysis(t_code, sel_cond_name, dart_api_key, tab_id="screener")
+            x=
