@@ -158,28 +158,26 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     start_dt = end_dt - timedelta(days=250)
     ohlcv = fdr.DataReader(ticker, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
     
-    if ohlcv.empty or len(ohlcv) < 5:
-        st.error("데이터를 불러올 수 없습니다.")
+   if ohlcv.empty:
+        st.error("주가 데이터를 불러올 수 없습니다.")
         return
 
-    for ma in [5, 20, 60, 120]:
-        ohlcv[f'MA{ma}'] = ohlcv['Close'].rolling(window=ma).mean()
-        
-    body = (ohlcv['Close'] - ohlcv['Open']).abs()
-    lower_shadow = ohlcv[['Open', 'Close']].min(axis=1) - ohlcv['Low']
-    upper_shadow = ohlcv['High'] - ohlcv[['Open', 'Close']].max(axis=1)
-    ohlcv['Hammer'] = (lower_shadow >= body * 2) & (upper_shadow <= body * 0.5) & (body > 0)
-    
-    ohlcv['Prev_Close'] = ohlcv['Close'].shift(1)
-    ohlcv['Vol_MA20'] = ohlcv['Volume'].rolling(window=20).mean()
-    ohlcv['Gap_Surge'] = (
-        (ohlcv['Open'] >= ohlcv['Prev_Close'] * 1.01) &
-        (ohlcv['Close'] > ohlcv['Open']) &
-        (ohlcv['Volume'] >= ohlcv['Vol_MA20'] * 1.5)
-    )
-
     latest = ohlcv.iloc[-1]
-    is_aligned = (latest['MA5'] > latest['MA20'] > latest['MA60'] > latest['MA120'])
+
+    # 상장 후 거래일이 5일 미만인 신규 상장주 예외 처리
+    if len(ohlcv) < 5:
+        st.divider()
+        st.subheader(f"📌 {stock_name} ({int(latest['Close']):,}원)")
+        st.warning(f"🆕 **신규 상장 종목 (상장 {len(ohlcv)}일차)** — 아직 차트 이동평균선과 5일 수급 데이터가 쌓이지 않았습니다. 상장 초기 변동성이 매우 크니 추격 매수에 각별히 주의하세요!")
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("당일 시가", f"{int(latest['Open']):,} 원")
+        c2.metric("당일 고가", f"{int(latest['High']):,} 원")
+        c3.metric("당일 저가", f"{int(latest['Low']):,} 원")
+        
+        if dart_res["status"] == "success":
+            st.info(f"📊 최근 공시 실적({dart_res['period']}): 영업이익 **{dart_res['curr_op']/100_000_000:,.1f}억 원** (전년 대비 {dart_res['op_growth']:+.1f}%)")
+        return
     
     # -----------------------------------------------------
     # [최상단] 신호등 종합 판정 계산
