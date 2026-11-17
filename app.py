@@ -380,4 +380,16 @@ with tab1:
 with tab2:
     c1, c2 = st.columns(2)
     market_sel = c1.selectbox("시장", ["KOSPI", "KOSDAQ"])
-    min_amt = c2.selectbox("거래대금 기준", [300, 500, 1000], format_
+    min_amt = c2.selectbox("거래대금 기준", [300, 500, 1000], format_func=lambda x: f"{x}억 이상")
+
+    df_cond, bday_str = run_condition_screener(market_sel, min_amt, 0.5, 2.5)
+    st.caption(f"기준일: {bday_str} (거품 없는 저PBR + 거래대금 급증 종목)")
+
+    if df_cond.empty:
+        st.info("해외 클라우드 서버에서 거래소 일괄 조회가 일시 제한되었거나 조건에 맞는 종목이 없습니다. 첫 번째 [🔍 종목 검색] 탭을 이용해 주세요!")
+    else:
+        st.dataframe(df_cond, use_container_width=True, height=220)
+        sel_cond_name = st.selectbox("자세히 볼 종목 선택", df_cond['종목명'].tolist())
+        if sel_cond_name:
+            t_code = df_cond[df_cond['종목명'] == sel_cond_name].index[0]
+            render_stock_analysis(t_code, sel_cond_name, dart_api_key, tab_id="screener")
