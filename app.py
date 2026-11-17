@@ -45,18 +45,18 @@ def run_condition_screener(market="KOSPI", min_amt_uk=300, min_gap_pct=0.5, max_
     try:
         df_ohlcv = stock.get_market_ohlcv(bday, market=market)
         df_fund = stock.get_market_fundamental(bday, market=market)
-        
+
         if df_ohlcv.empty:
             return pd.DataFrame(), bday
 
         df = df_ohlcv.join(df_fund[['PER', 'PBR']], how='left')
         df['종목명'] = [stock.get_market_ticker_name(t) for t in df.index]
-        
+
         df['전일종가'] = df['종가'] / (1 + df['등락률'] / 100)
         df['시가갭(%)'] = (((df['시가'] - df['전일종가']) / df['전일종가']) * 100).round(1)
         df['거래대금(억)'] = (df['거래대금'] / 100_000_000).round(0)
         df['등락률'] = df['등락률'].round(1)
-        
+
         cond = (
             (df['거래대금(억)'] >= min_amt_uk) &
             (df['시가갭(%)'] >= min_gap_pct) &
@@ -121,19 +121,19 @@ def check_dart_performance(api_key, ticker):
             fs_sub = fs[fs['fs_div'] == 'CFS']
             if fs_sub.empty:
                 fs_sub = fs[fs['fs_div'] == 'OFS']
-                
+
             op_row = fs_sub[fs_sub['account_nm'].str.contains('영업이익', na=False)]
             if not op_row.empty:
                 def parse_num(val):
                     if pd.isna(val) or str(val).strip() in ['', '-']:
                         return 0
                     return int(str(val).replace(',', '').strip())
-                
+
                 curr_op = parse_num(op_row.iloc[0]['thstrm_amount'])
                 prev_op = parse_num(op_row.iloc[0]['frmtrm_amount'])
                 op_diff = curr_op - prev_op
                 op_growth = ((curr_op - prev_op) / abs(prev_op) * 100) if prev_op != 0 else 0.0
-                
+
                 return {
                     "status": "success",
                     "period": f"{yr}년 {label}",
@@ -147,130 +147,3 @@ def check_dart_performance(api_key, ticker):
 
 # ---------------------------------------------------------
 # 6. 모바일 큰 글씨 최적화 상세 진단 렌더링
-# ---------------------------------------------------------
-def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
-    fund_data, _ = get_single_fundamental(ticker)
-    supply = get_investor_supply(ticker)
-    dart_res = check_dart_performance(dart_api_key, ticker) if dart_api_key else {"status": "none"}
-    
-    end_dt = datetime.today()
-    start_dt = end_dt - timedelta(days=250)
-    ohlcv = fdr.DataReader(ticker, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
-    
-    if ohlcv.empty:
-        st.error("주가 데이터를 불러올 수 없습니다.")
-        return
-
-    latest = ohlcv.iloc[-1]
-
-    # 상장 후 거래일이 5일 미만인 신규 상장주 예외 처리
-    if len(ohlcv) < 5:
-        st.divider()
-        st.subheader(f"📌 {stock_name} ({int(latest['Close']):,}원)")
-        st.warning(f"🆕 **신규 상장 종목 (상장 {len(ohlcv)}일차)** — 아직 차트 이동평균선과 5일 수급 데이터가 쌓이지 않았습니다. 상장 초기 변동성이 매우 크니 추격 매수에 각별히 주의하세요!")
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("당일 시가", f"{int(latest['Open']):,} 원")
-        c2.metric("당일 고가", f"{int(latest['High']):,} 원")
-        c3.metric("당일 저가", f"{int(latest['Low']):,} 원")
-        
-        if dart_res["status"] == "success":
-            st.info(f"📊 최근 공시 실적({dart_res['period']}): 영업이익 **{dart_res['curr_op']/100_000_000:,.1f}억 원** (전년 대비 {dart_res['op_growth']:+.1f}%)")
-        return
-
-    for ma in [5, 20, 60, 120]:
-        ohlcv[f'MA{ma}'] = ohlcv['Close'].rolling(window=ma).mean()
-        
-    body = (ohlcv['Close'] - ohlcv['Open']).abs()
-    lower_shadow = ohlcv[['Open', 'Close']].min(axis=1) - ohlcv['Low']
-    upper_shadow = ohlcv['High'] - ohlcv[['Open', 'Close']].max(axis=1)
-    ohlcv['Hammer'] = (lower_shadow >= body * 2) & (upper_shadow <= body * 0.5) & (body > 0)
-    
-    ohlcv['Prev_Close'] = ohlcv['Close'].shift(1)
-    ohlcv['Vol_MA20'] = ohlcv['Volume'].rolling(window=20).mean()
-    ohlcv['Gap_Surge'] = (
-        (ohlcv['Open'] >= ohlcv['Prev_Close'] * 1.01) &
-        (ohlcv['Close'] > ohlcv['Open']) &
-        (ohlcv['Volume'] >= ohlcv['Vol_MA20'] * 1.5)
-    )
-
-    is_aligned = (latest['MA5'] > latest['MA20'] > latest['MA60'] > latest['MA120'])
-    
-    # -----------------------------------------------------
-    # [최상단] 신호등 종합 판정 계산
-    # -----------------------------------------------------
-    reasons = []
-    score = 0
-    is_deficit = False
-
-    if dart_res["status"] == "success":
-        if dart_res['curr_op'] <= 0:
-            is_deficit = True
-            reasons.append("❌ 영업이익 적자 기업")
-        elif dart_res['op_diff'] > 0:
-            score += 2
-            reasons.append(f"✅ 영업이익 전년 대비 {dart_res['op_growth']:+.0f}% 증가")
-        else:
-            score += 1
-            reasons.append("⚠️ 흑자이나 영업이익 감소")
-
-    pbr_val = fund_data.get('PBR', 0) if fund_data else 0
-    if 0 < pbr_val <= 1.2:
-        score += 1
-        reasons.append(f"✅ 저평가 상태 (PBR {pbr_val:.2f}배)")
-    elif pbr_val > 3.0:
-        reasons.append(f"⚠️ 주가 고평가 주의 (PBR {pbr_val:.2f}배)")
-
-    if supply:
-        big_money = supply['inst'] + supply['frgn']
-        if big_money > 0:
-            score += 1
-            reasons.append("✅ 최근 5일 기관·외국인 매수 유입")
-        else:
-            reasons.append("⚠️ 최근 5일 큰손(기관·외국인) 매도 우위")
-
-    if is_aligned:
-        score += 1
-        reasons.append("✅ 차트 상승 추세(정배열)")
-    else:
-        reasons.append("⏸️ 차트 방향 탐색 중(비정배열)")
-
-    st.divider()
-    st.subheader(f"📌 {stock_name} ({int(latest['Close']):,}원)")
-
-    if is_deficit:
-        st.error("### 🔴 [위험] 적자 기업 — 피하세요")
-    elif score >= 4:
-        st.success("### 🟢 [안전] 실적·수급 우수 — 분할 매수 검토")
-    elif score >= 2:
-        st.warning("### 🟡 [주의] 일부 조건 부족 — 관망 추천")
-    else:
-        st.error("### 🔴 [위험] 수급·추세 약함 — 신중 접근")
-
-    for r in reasons:
-        st.markdown(f"**{r}**")
-
-    # -----------------------------------------------------
-    # [중단] 핵심 숫자 3개만 크게 표시
-    # -----------------------------------------------------
-    st.divider()
-    m1, m2, m3 = st.columns(3)
-    
-    if dart_res["status"] == "success":
-        m1.metric("최근 영업이익", f"{dart_res['curr_op']/100_000_000:,.0f} 억", f"{dart_res['op_growth']:+.1f}%")
-    else:
-        m1.metric("PER (수익비율)", f"{fund_data.get('PER', 0):.1f} 배" if fund_data else "-")
-        
-    if supply:
-        m2.metric("기관+외국인(5일)", f"{supply['inst']+supply['frgn']:+,.0f} 억")
-    else:
-        m2.metric("큰손 수급", "-")
-        
-    m3.metric("PBR (1이하면 저평가)", f"{pbr_val:.2f} 배" if pbr_val > 0 else "-")
-
-    # -----------------------------------------------------
-    # [하단] 일봉 + 이동평균선 차트
-    # -----------------------------------------------------
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=ohlcv.index, open=ohlcv['Open'], high=ohlcv
