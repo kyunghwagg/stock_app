@@ -24,7 +24,6 @@ CORE_BLUECHIPS = [
     ("030200", "KT"), ("015760", "한국전력")
 ]
 
-# 선물·ETF·ETN·스팩·우선주 판별 필터 함수
 EXCLUDE_KEYWORDS = [
     "선물", "F 20", "F20", "코스피", "코스닥", "지수", "레버리지", "인버스",
     "ETN", "ETF", "스팩", "리츠", "KODEX", "TIGER", "KBSTAR", "RISE",
@@ -41,7 +40,7 @@ def is_pure_common_stock(code, name):
         return False
     return True
 
-# 1. 전체 상장 종목 마스터 불러오기 (순수 보통주만 필터링)
+# 1. 전체 상장 종목 마스터 불러오기
 @st.cache_data(ttl=86400)
 def get_all_tickers():
     df_res = pd.DataFrame()
@@ -90,7 +89,7 @@ def get_latest_bday():
             continue
     return datetime.today().strftime("%Y%m%d")
 
-# 3. 기관·외국인 최근 5일 수급 조회 (네이버 증권 모바일 JSON API + pykrx)
+# 3. 기관·외국인 최근 5일 수급 조회
 @st.cache_data(ttl=1800)
 def _fetch_naver_supply_cached(ticker):
     url = f"https://m.stock.naver.com/api/stock/{ticker}/trend"
@@ -131,7 +130,7 @@ def get_investor_supply(ticker):
         pass
     return None
 
-# 4. 개별 종목 PER·PBR 조회 (네이버 증권 모바일 JSON API + pykrx)
+# 4. 개별 종목 PER·PBR 조회
 @st.cache_data(ttl=3600)
 def _fetch_naver_fund_cached(ticker):
     url = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
@@ -212,7 +211,7 @@ def check_dart_performance(api_key, ticker):
     except Exception:
         return {"status": "error"}
 
-# 6. 네이버 모바일 상승률/시가총액 상위 순수 기업 종목 25개 확보
+# 6. 네이버 모바일 상승률/시가총액 상위 순수 기업 종목 확보
 @st.cache_data(ttl=900)
 def get_market_movers(market="KOSPI"):
     movers = []
@@ -238,7 +237,7 @@ def get_market_movers(market="KOSPI"):
         return CORE_BLUECHIPS
     return movers[:25]
 
-# 7. [오늘의 시장 흐름 & 안전 진단] 상승중인 주식 10~15개 나열 + 안전/관망/위험 판정
+# 7. [오늘의 시장 흐름 & 안전 진단] 상승중인 주식 10~15개 나열
 @st.cache_data(ttl=900)
 def get_rising_stocks_board(dart_api_key, market="KOSPI"):
     bday = get_latest_bday()
@@ -279,7 +278,7 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
             is_profitable = (dart_res["status"] == "success" and dart_res['curr_op'] > 0)
 
             if is_deficit:
-                status_badge = "🔴 위험 (적자)"
+                status_badge = "🔴 위험(적자)"
                 summary = "주가 상승 중이나 영업이익 적자 기업"
                 priority = 3
             elif is_earnings_up and is_up_trend and big_money > 0:
@@ -287,7 +286,7 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
                 summary = "실적성장 + 큰손매수 + 상승추세 일치"
                 priority = 1
             elif (is_earnings_up or is_profitable) and (0 < pbr_val <= 1.3) and not is_up_trend:
-                status_badge = "🔵 저평가 분할매수"
+                status_badge = "🔵 분할매수 기회"
                 summary = "실적·저평가 우량주 (눌림목 반등 시도)"
                 priority = 2
             elif is_up_trend and big_money > 0:
@@ -327,7 +326,6 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
     rising_list.sort(key=lambda x: (x["_priority"], -x["_chg"]))
     fallback_list.sort(key=lambda x: (x["_priority"], -x["_chg"]))
 
-    # 최대 15개까지 표시 (상승 종목이 12개 미만이면 우량주 보충 리스트로 12개 이상 채움)
     combined = rising_list[:15]
     if len(combined) < 12:
         combined.extend(fallback_list[:12 - len(combined)])
@@ -530,37 +528,76 @@ with st.sidebar:
 tab1, tab2 = st.tabs(["⚡ 오늘의 상승주 & 안전 진단", "🔍 원하는 종목 직접 검색"])
 
 with tab1:
-    st.markdown("현재 **상승 흐름을 타는 기업 종목(12~15개)**을 나열하고, 옆에 **안전(🟢)·관망(🟡)·위험(🔴) 판정**을 함께 보여줍니다.")
+    st.markdown("현재 **상승 흐름을 타는 기업 종목**들을 한눈에 보여줍니다. **아래 종목 버튼을 누르면 상세 진단과 차트가 열립니다.**")
     market_sel = st.radio("시장 선택", ["KOSPI", "KOSDAQ"], horizontal=True)
 
-    with st.spinner("현재 상승 중인 기업 15곳의 실적과 큰손 수급을 진단하는 중입니다..."):
+    with st.spinner("현재 상승 중인 기업들의 실적과 큰손 수급을 진단하는 중입니다..."):
         df_board, bday_str = get_rising_stocks_board(dart_api_key, market_sel)
 
-    st.caption(f"기준일: {bday_str} (선물·ETF·스팩 제외 / 겉으로 주가가 올라도 적자이거나 큰손이 팔고 있으면 '위험/관망'으로 경고합니다)")
+    st.caption(f"기준일: {bday_str} (선물·ETF·스팩 제외)")
 
     if df_board.empty:
         st.warning("현재 시장 데이터를 불러오지 못했습니다. 잠시 후 다시 시도하거나 두 번째 탭에서 직접 검색해 주세요.")
     else:
+        # 상단 요약 표
         st.dataframe(
             df_board[['종목명', '안전판정', '현재가', '등락률', '큰손수급(5일)', 'PER/PBR', '진단요약']],
             use_container_width=True,
             hide_index=True,
-            height=460
+            height=420
         )
 
-        df_board['SelectLabel'] = df_board['종목명'] + " (" + df_board['안전판정'] + ")"
-        sel_label = st.selectbox("👇 아래에서 종목을 선택하면 상세 진단과 차트가 열립니다", df_board['SelectLabel'].tolist())
-        if sel_label:
-            rec_row = df_board[df_board['SelectLabel'] == sel_label].iloc[0]
-            render_stock_analysis(rec_row['종목코드'], rec_row['종목명'], dart_api_key, tab_id="rising_board")
+        # 아버지가 바로 누를 수 있는 원클릭 종목 카드 버튼 (3열 그리드)
+        st.markdown("#### 👆 자세히 볼 주식 이름을 바로 눌러주세요")
+        state_key = f"selected_ticker_{market_sel}"
+        if state_key not in st.session_state or st.session_state[state_key] not in df_board['종목코드'].values:
+            st.session_state[state_key] = df_board.iloc[0]['종목코드']
+
+        cols = st.columns(3)
+        for idx, row in df_board.iterrows():
+            col = cols[idx % 3]
+            is_selected = (st.session_state[state_key] == row['종목코드'])
+            btn_label = f"{row['종목명']} ({row['등락률']})\n{row['안전판정']}"
+            if col.button(
+                btn_label,
+                key=f"btn_{market_sel}_{row['종목코드']}",
+                use_container_width=True,
+                type="primary" if is_selected else "secondary"
+            ):
+                st.session_state[state_key] = row['종목코드']
+                st.rerun()
+
+        # 선택된 종목 상세 진단 즉시 출력
+        sel_row = df_board[df_board['종목코드'] == st.session_state[state_key]].iloc[0]
+        render_stock_analysis(sel_row['종목코드'], sel_row['종목명'], dart_api_key, tab_id="rising_board")
 
 with tab2:
+    st.markdown("**자주 찾는 대표 종목 버튼**을 누르시거나, 아래 칸에 회사 이름·종목코드를 입력해 주세요.")
+    quick_picks = [
+        ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"),
+        ("034020", "두산에너빌리티"), ("012450", "한화에어로스페이스"), ("030530", "원익홀딩스")
+    ]
+    if "quick_search_code" not in st.session_state:
+        st.session_state["quick_search_code"] = ""
+
+    q_cols = st.columns(3)
+    for idx, (q_code, q_name) in enumerate(quick_picks):
+        if q_cols[idx % 3].button(
+            f"📌 {q_name}",
+            key=f"qbtn_{q_code}",
+            use_container_width=True,
+            type="primary" if st.session_state["quick_search_code"] == q_code else "secondary"
+        ):
+            st.session_state["quick_search_code"] = q_code
+            st.rerun()
+
+    st.divider()
     all_tickers = get_all_tickers()
     all_tickers['Display'] = all_tickers['Name'] + " (" + all_tickers['Code'] + ")"
     options = all_tickers['Display'].tolist()
     default_idx = next((i for i, s in enumerate(options) if s.startswith("삼성전자 (")), 0)
 
-    selected_display = st.selectbox("회사 이름을 선택하거나 입력하세요", options, index=default_idx)
+    selected_display = st.selectbox("전체 상장사 목록에서 찾기", options, index=default_idx)
     custom_code = st.text_input("또는 6자리 종목코드 직접 입력 (예: 030530)", value="")
 
     if custom_code.strip() and len(custom_code.strip()) == 6:
@@ -568,6 +605,10 @@ with tab2:
         matched = all_tickers[all_tickers['Code'] == code_input]
         s_name = matched['Name'].iloc[0] if not matched.empty else code_input
         render_stock_analysis(code_input, s_name, dart_api_key, tab_id="search_custom")
+    elif st.session_state["quick_search_code"]:
+        q_code = st.session_state["quick_search_code"]
+        q_name = dict(quick_picks).get(q_code, q_code)
+        render_stock_analysis(q_code, q_name, dart_api_key, tab_id="search_quick")
     elif selected_display:
         sel_row = all_tickers[all_tickers['Display'] == selected_display].iloc[0]
         render_stock_analysis(sel_row['Code'], sel_row['Name'], dart_api_key, tab_id="search")
