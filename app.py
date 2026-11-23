@@ -68,10 +68,32 @@ def get_latest_bday():
             continue
     return datetime.today().strftime("%Y%m%d")
 
-# 3. 기관·외국인 최근 5일 수급 조회 (pykrx + 네이버 금융 백업)
+# 3. 기관·외국인 최근 5일 수급 조회 (네이버 증권 모바일 JSON API + pykrx)
 @st.cache_data(ttl=1800)
+def _fetch_naver_supply_cached(ticker):
+    url = f"https://m.stock.naver.com/api/stock/{ticker}/trend"
+    res = requests.get(url, headers=HEADERS, timeout=5)
+    data = res.json()
+    if not isinstance(data, list) or len(data) == 0:
+        raise ValueError("Empty trend data")
+
+    inst_sum = 0.0
+    frgn_sum = 0.0
+    for row in data[:5]:
+        close_p = float(str(row.get("closePrice", "0")).replace(",", ""))
+        inst_vol = float(str(row.get("organPureBuyQuant", "0")).replace(",", "").replace("+", ""))
+        frgn_vol = float(str(row.get("foreignerPureBuyQuant", "0")).replace(",", "").replace("+", ""))
+        inst_sum += (inst_vol * close_p) / 100_000_000
+        frgn_sum += (frgn_vol * close_p) / 100_000_000
+
+    return {"inst": inst_sum, "frgn": frgn_sum, "indiv": -(inst_sum + frgn_sum)}
+
 def get_investor_supply(ticker):
-    # 1순위: pykrx
+    try:
+        return _fetch_naver_supply_cached(ticker)
+    except Exception:
+        pass
+
     end_dt = get_latest_bday()
     start_dt = (datetime.strptime(end_dt, "%Y%m%d") - timedelta(days=12)).strftime("%Y%m%d")
     try:
@@ -85,73 +107,41 @@ def get_investor_supply(ticker):
             }
     except Exception:
         pass
+    return None
 
-    # 2순위: 네이버 금융 투자자별 매매동향 직접 파싱 (해외 클라우드 IP 우회)
+# 4. 개별 종목 PER·PBR 조회 (네이버 증권 모바일 JSON API + pykrx)
+@st.cache_data(ttl=3600)
+def _fetch_naver_fund_cached(ticker):
+    url = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
+    res = requests.get(url, headers=HEADERS, timeout=5)
+    data = res.json()
+    infos = data.get("totalInfos", [])
+    per_val = 0.0
+    pbr_val = 0.0
+    for item in infos:
+        code = item.get("code")
+        val_str = str(item.get("value", "")).replace(",", "").replace("배", "").strip()
+        if code == "per" and val_str and val_str != "N/A":
+            per_val = float(val_str)
+        elif code == "pbr" and val_str and val_str != "N/A":
+            pbr_val = float(val_str)
+    if per_val == 0.0 and pbr_val == 0.0:
+        raise ValueError("No PER/PBR")
+    return {"PER": per_val, "PBR": pbr_val}
+
+def get_single_fundamental(ticker):
+    bday = get_latest_bday()
     try:
-        url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
-        res = requests.get(url, headers=HEADERS, timeout=5)
-        res.encoding = 'euc-kr'
-        soup = BeautifulSoup(res.text, "html.parser")
-        rows = soup.select("table.type2 tr")
-        
-        inst_sum = 0.0
-        frgn_sum = 0.0
-        count = 0
-        for tr in rows:
-            tds = tr.find_all("td")
-            if len(tds) >= 7:
-                date_txt = tds[0].get_text(strip=True)
-                if re.match(r"\d{4}\.\d{2}\.\d{2}", date_txt):
-                    close_p = float(tds[1].get_text(strip=True).replace(",", ""))
-                    inst_vol = float(tds[5].get_text(strip=True).replace(",", "").replace("+", ""))
-                    frgn_vol = float(tds[6].get_text(strip=True).replace(",", "").replace("+", ""))
-                    # 순매수 주수 * 종가 -> 억 원 환산
-                    inst_sum += (inst_vol * close_p) / 100_000_000
-                    frgn_sum += (frgn_vol * close_p) / 100_000_000
-                    count += 1
-                    if count >= 5:
-                        break
-        if count > 0:
-            return {"inst": inst_sum, "frgn": frgn_sum, "indiv": -(inst_sum + frgn_sum)}
+        return _fetch_naver_fund_cached(ticker), bday
     except Exception:
         pass
 
-    return None
-
-# 4. 개별 종목 PER·PBR 조회 (pykrx + 네이버 금융 백업)
-@st.cache_data(ttl=3600)
-def get_single_fundamental(ticker):
-    bday = get_latest_bday()
-    # 1순위: pykrx
     try:
         df = stock.get_market_fundamental(bday, bday, ticker)
         if not df.empty and (df.iloc[0]['PBR'] > 0 or df.iloc[0]['PER'] > 0):
             return df.iloc[0].to_dict(), bday
     except Exception:
         pass
-
-    # 2순위: 네이버 금융 종목 메인에서 PER, PBR 직접 파싱
-    try:
-        url = f"https://finance.naver.com/item/main.naver?code={ticker}"
-        res = requests.get(url, headers=HEADERS, timeout=5)
-        res.encoding = 'euc-kr'
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        per_val = 0.0
-        pbr_val = 0.0
-        per_el = soup.select_one("#_per")
-        pbr_el = soup.select_one("#_pbr")
-
-        if per_el and per_el.get_text(strip=True):
-            per_val = float(per_el.get_text(strip=True).replace(",", ""))
-        if pbr_el and pbr_el.get_text(strip=True):
-            pbr_val = float(pbr_el.get_text(strip=True).replace(",", ""))
-
-        if per_val > 0 or pbr_val > 0:
-            return {"PER": per_val, "PBR": pbr_val}, bday
-    except Exception:
-        pass
-
     return None, bday
 
 # 5. OpenDART 공시 영업이익 검증
