@@ -1,5 +1,8 @@
 import streamlit as st
 import pandas as pd
+import requests
+import re
+from bs4 import BeautifulSoup
 from pykrx import stock
 import FinanceDataReader as fdr
 import OpenDartReader
@@ -9,7 +12,10 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="안전 주식 분석기", layout="wide")
 st.title("📈 안전 주식 분석기")
 
-# 대표 우량주 풀 (하락장 저평가 우량주 발굴 및 클라우드 조회 보완용)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+}
+
 CORE_BLUECHIPS = [
     ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"),
     ("000270", "기아"), ("005490", "POSCO홀딩스"), ("035420", "NAVER"),
@@ -62,36 +68,93 @@ def get_latest_bday():
             continue
     return datetime.today().strftime("%Y%m%d")
 
-# 3. 기관·외국인 최근 5일 수급 조회
+# 3. 기관·외국인 최근 5일 수급 조회 (pykrx + 네이버 금융 백업)
 @st.cache_data(ttl=1800)
 def get_investor_supply(ticker):
+    # 1순위: pykrx
     end_dt = get_latest_bday()
     start_dt = (datetime.strptime(end_dt, "%Y%m%d") - timedelta(days=12)).strftime("%Y%m%d")
     try:
         df_inv = stock.get_market_trading_value_by_date(start_dt, end_dt, ticker)
-        if df_inv.empty:
-            return None
-        recent_5 = df_inv.tail(5)
-        return {
-            "inst": recent_5['기관합계'].sum() / 100_000_000,
-            "frgn": recent_5['외국인합계'].sum() / 100_000_000,
-            "indiv": recent_5['개인'].sum() / 100_000_000
-        }
+        if not df_inv.empty:
+            recent_5 = df_inv.tail(5)
+            return {
+                "inst": recent_5['기관합계'].sum() / 100_000_000,
+                "frgn": recent_5['외국인합계'].sum() / 100_000_000,
+                "indiv": recent_5['개인'].sum() / 100_000_000
+            }
     except Exception:
-        return None
+        pass
 
-# 4. 개별 종목 PER·PBR 및 OpenDART 실적 검증
+    # 2순위: 네이버 금융 투자자별 매매동향 직접 파싱 (해외 클라우드 IP 우회)
+    try:
+        url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
+        res = requests.get(url, headers=HEADERS, timeout=5)
+        res.encoding = 'euc-kr'
+        soup = BeautifulSoup(res.text, "html.parser")
+        rows = soup.select("table.type2 tr")
+        
+        inst_sum = 0.0
+        frgn_sum = 0.0
+        count = 0
+        for tr in rows:
+            tds = tr.find_all("td")
+            if len(tds) >= 7:
+                date_txt = tds[0].get_text(strip=True)
+                if re.match(r"\d{4}\.\d{2}\.\d{2}", date_txt):
+                    close_p = float(tds[1].get_text(strip=True).replace(",", ""))
+                    inst_vol = float(tds[5].get_text(strip=True).replace(",", "").replace("+", ""))
+                    frgn_vol = float(tds[6].get_text(strip=True).replace(",", "").replace("+", ""))
+                    # 순매수 주수 * 종가 -> 억 원 환산
+                    inst_sum += (inst_vol * close_p) / 100_000_000
+                    frgn_sum += (frgn_vol * close_p) / 100_000_000
+                    count += 1
+                    if count >= 5:
+                        break
+        if count > 0:
+            return {"inst": inst_sum, "frgn": frgn_sum, "indiv": -(inst_sum + frgn_sum)}
+    except Exception:
+        pass
+
+    return None
+
+# 4. 개별 종목 PER·PBR 조회 (pykrx + 네이버 금융 백업)
 @st.cache_data(ttl=3600)
 def get_single_fundamental(ticker):
     bday = get_latest_bday()
+    # 1순위: pykrx
     try:
         df = stock.get_market_fundamental(bday, bday, ticker)
-        if not df.empty:
+        if not df.empty and (df.iloc[0]['PBR'] > 0 or df.iloc[0]['PER'] > 0):
             return df.iloc[0].to_dict(), bday
     except Exception:
         pass
+
+    # 2순위: 네이버 금융 종목 메인에서 PER, PBR 직접 파싱
+    try:
+        url = f"https://finance.naver.com/item/main.naver?code={ticker}"
+        res = requests.get(url, headers=HEADERS, timeout=5)
+        res.encoding = 'euc-kr'
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        per_val = 0.0
+        pbr_val = 0.0
+        per_el = soup.select_one("#_per")
+        pbr_el = soup.select_one("#_pbr")
+
+        if per_el and per_el.get_text(strip=True):
+            per_val = float(per_el.get_text(strip=True).replace(",", ""))
+        if pbr_el and pbr_el.get_text(strip=True):
+            pbr_val = float(pbr_el.get_text(strip=True).replace(",", ""))
+
+        if per_val > 0 or pbr_val > 0:
+            return {"PER": per_val, "PBR": pbr_val}, bday
+    except Exception:
+        pass
+
     return None, bday
 
+# 5. OpenDART 공시 영업이익 검증
 @st.cache_data(ttl=86400)
 def check_dart_performance(api_key, ticker):
     if not api_key:
@@ -137,14 +200,13 @@ def check_dart_performance(api_key, ticker):
     except Exception:
         return {"status": "error"}
 
-# 5. [자동 추천 엔진] 상승장 추세주 + 하락장 저평가 우량주 TOP 5 보장
+# 6. [자동 추천 엔진] 상승장 추세주 + 하락장 저평가 우량주 TOP 5 보장
 @st.cache_data(ttl=1800)
 def get_auto_recommended_stocks(dart_api_key, market="KOSPI"):
     bday = get_latest_bday()
     candidates = []
     seen = set()
 
-    # 1차 후보: 당일 거래대금 상위 + PBR 2.0 이하
     try:
         df_ohlcv = stock.get_market_ohlcv(bday, market=market)
         df_fund = stock.get_market_fundamental(bday, market=market)
@@ -159,15 +221,14 @@ def get_auto_recommended_stocks(dart_api_key, market="KOSPI"):
     except Exception:
         pass
 
-    # 2차 보완 풀: 하락장에서도 저평가 우량주 3~5개를 확보하기 위해 대표 우량주 합산 (KOSPI 기준)
     if market == "KOSPI":
         for t, name in CORE_BLUECHIPS:
             if t not in seen:
                 candidates.append((t, name))
                 seen.add(t)
 
-    primary_results = []   # 1순위: 상승추세/수급 우수 종목
-    value_backups = []     # 2순위: 하락장 저평가 분할매수 후보
+    primary_results = []
+    value_backups = []
 
     end_dt = datetime.today()
     start_dt = end_dt - timedelta(days=100)
@@ -190,14 +251,12 @@ def get_auto_recommended_stocks(dart_api_key, market="KOSPI"):
 
             fund_data, _ = get_single_fundamental(ticker)
             pbr_val = round(fund_data.get('PBR', 0), 2) if fund_data else 0
-            per_val = round(fund_data.get('PER', 0), 1) if fund_data else 0
 
             dart_res = check_dart_performance(dart_api_key, ticker)
             is_deficit = (dart_res["status"] == "success" and dart_res['curr_op'] <= 0)
             is_earnings_up = (dart_res["status"] == "success" and dart_res['op_diff'] > 0)
             is_profitable = (dart_res["status"] == "success" and dart_res['curr_op'] > 0)
 
-            # 적자 기업은 어떤 경우에도 제외
             if is_deficit:
                 continue
 
@@ -212,7 +271,6 @@ def get_auto_recommended_stocks(dart_api_key, market="KOSPI"):
                 "PBR": f"{pbr_val:.2f}배" if pbr_val > 0 else "-",
             }
 
-            # 1순위 분류: 기존 상승/수급/실적 우수 종목
             if is_earnings_up and is_up_trend and big_money > 0:
                 primary_results.append({
                     **row_base,
@@ -227,7 +285,6 @@ def get_auto_recommended_stocks(dart_api_key, market="KOSPI"):
                     "추천이유": "기관·외국인 매수 유입",
                     "_score": 70 + big_money
                 })
-            # 2순위 분류: 하락장 저평가 분할매수 후보 (흑자/성장 + PBR 1.3 이하)
             elif (is_earnings_up or is_profitable) and (0 < pbr_val <= 1.3):
                 growth_bonus = max(dart_res.get('op_growth', 0), 0) * 0.2 if dart_res["status"] == "success" else 0
                 val_score = (1.5 - pbr_val) * 30 + growth_bonus
@@ -244,19 +301,16 @@ def get_auto_recommended_stocks(dart_api_key, market="KOSPI"):
     primary_results.sort(key=lambda x: x["_score"], reverse=True)
     value_backups.sort(key=lambda x: x["_score"], reverse=True)
 
-    # 1순위를 먼저 담고, 5개가 안 되면 2순위(저평가 우량주)로 채워 3~5개 유지
     combined = primary_results[:5]
     if len(combined) < 5:
-        needed = 5 - len(combined)
-        combined.extend(value_backups[:needed])
+        combined.extend(value_backups[:5 - len(combined)])
 
     if not combined:
         return pd.DataFrame(), bday
 
-    res_df = pd.DataFrame(combined).drop(columns=["_score"])
-    return res_df, bday
+    return pd.DataFrame(combined).drop(columns=["_score"]), bday
 
-# 6. 상세 진단 화면 렌더링 (세분화 판정 적용)
+# 7. 상세 진단 화면 렌더링
 def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     fund_data, _ = get_single_fundamental(ticker)
     supply = get_investor_supply(ticker)
@@ -381,20 +435,23 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
         for r in tech_reasons:
             st.markdown(f"- {r}")
 
+    # [중단] 핵심 숫자 4개 (영업이익 + 큰손수급 + PER + PBR 모두 표시)
     st.divider()
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     if dart_res["status"] == "success":
         m1.metric("최근 영업이익", f"{dart_res['curr_op']/100_000_000:,.0f} 억", f"{dart_res['op_growth']:+.1f}%")
     else:
-        m1.metric("PER (수익비율)", f"{per_val:.1f} 배" if per_val > 0 else "-")
+        m1.metric("최근 영업이익", "-")
 
     if supply:
-        m2.metric("기관+외국인(5일)", f"{supply['inst']+supply['frgn']:+,.0f} 억")
+        m2.metric("큰손수급(5일)", f"{supply['inst']+supply['frgn']:+,.0f} 억")
     else:
-        m2.metric("큰손 수급", "-")
+        m2.metric("큰손수급(5일)", "-")
 
-    m3.metric("PBR (1이하면 저평가)", f"{pbr_val:.2f} 배" if pbr_val > 0 else "-")
+    m3.metric("PER (주가수익비율)", f"{per_val:.1f} 배" if per_val > 0 else "-")
+    m4.metric("PBR (1이하면 저평가)", f"{pbr_val:.2f} 배" if pbr_val > 0 else "-")
 
+    # [하단] 일봉 + 이동평균선 차트
     fig = go.Figure()
     candle = go.Candlestick(
         x=ohlcv.index, open=ohlcv['Open'], high=ohlcv['High'], low=ohlcv['Low'], close=ohlcv['Close'],
@@ -474,7 +531,7 @@ with tab2:
     default_idx = next((i for i, s in enumerate(options) if s.startswith("삼성전자 (")), 0)
 
     selected_display = st.selectbox("회사 이름을 선택하거나 입력하세요", options, index=default_idx)
-    custom_code = st.text_input("또는 6자리 종목코드 직접 입력 (예: 493260)", value="")
+    custom_code = st.text_input("또는 6자리 종목코드 직접 입력 (예: 030530)", value="")
 
     if custom_code.strip() and len(custom_code.strip()) == 6:
         code_input = custom_code.strip()
