@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import re
-from bs4 import BeautifulSoup
 from pykrx import stock
 import FinanceDataReader as fdr
 import OpenDartReader
@@ -190,35 +188,44 @@ def check_dart_performance(api_key, ticker):
     except Exception:
         return {"status": "error"}
 
-# 6. [자동 추천 엔진] 상승장 추세주 + 하락장 저평가 우량주 TOP 5 보장
-@st.cache_data(ttl=1800)
-def get_auto_recommended_stocks(dart_api_key, market="KOSPI"):
-    bday = get_latest_bday()
-    candidates = []
+# 6. 네이버 모바일 상승률/거래상위 종목 실시간 확보 (클라우드 IP 100% 작동)
+@st.cache_data(ttl=900)
+def get_market_movers(market="KOSPI"):
+    movers = []
     seen = set()
+    # 네이버 모바일 시가총액 상위 및 상승률 상위 API
+    endpoints = [
+        f"https://m.stock.naver.com/api/stocks/up/{market}?page=1&pageSize=20",
+        f"https://m.stock.naver.com/api/stocks/marketValue/{market}?page=1&pageSize=20"
+    ]
+    for url in endpoints:
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=5)
+            stocks = res.json().get("stocks", [])
+            for s in stocks:
+                code = s.get("itemCode", "")
+                name = s.get("stockName", "")
+                # ETF/ETN/스팩 제외 (6자리 일반 종목 위주)
+                if len(code) == 6 and code.isdigit() and code not in seen:
+                    if any(k in name for k in ["KODEX", "TIGER", "KBSTAR", "ACE", "SOL", "스팩", "ETN"]):
+                        continue
+                    movers.append((code, name))
+                    seen.add(code)
+        except Exception:
+            continue
 
-    try:
-        df_ohlcv = stock.get_market_ohlcv(bday, market=market)
-        df_fund = stock.get_market_fundamental(bday, market=market)
-        if not df_ohlcv.empty and not df_fund.empty:
-            df = df_ohlcv.join(df_fund[['PER', 'PBR']], how='left')
-            df['거래대금(억)'] = df['거래대금'] / 100_000_000
-            cond = (df['거래대금(억)'] >= 100) & (df['PBR'] > 0) & (df['PBR'] <= 2.0)
-            top_df = df[cond].sort_values(by='거래대금(억)', ascending=False).head(15)
-            for t in top_df.index:
-                candidates.append((t, stock.get_market_ticker_name(t)))
-                seen.add(t)
-    except Exception:
-        pass
+    if not movers and market == "KOSPI":
+        return CORE_BLUECHIPS
+    return movers[:18]
 
-    if market == "KOSPI":
-        for t, name in CORE_BLUECHIPS:
-            if t not in seen:
-                candidates.append((t, name))
-                seen.add(t)
+# 7. [오늘의 시장 흐름 & 안전 진단] 상승중인 주식 나열 + 안전/관망/위험 판정
+@st.cache_data(ttl=900)
+def get_rising_stocks_board(dart_api_key, market="KOSPI"):
+    bday = get_latest_bday()
+    candidates = get_market_movers(market)
 
-    primary_results = []
-    value_backups = []
+    rising_list = []
+    fallback_list = []
 
     end_dt = datetime.today()
     start_dt = end_dt - timedelta(days=100)
@@ -236,71 +243,83 @@ def get_auto_recommended_stocks(dart_api_key, market="KOSPI"):
             prev_close = int(ohlcv['Close'].iloc[-2])
             chg_pct = round((curr_close - prev_close) / prev_close * 100, 1)
 
+            # 상승 흐름 판별: 당일 상승 중이거나 20일 이동평균선 위 상승 추세
+            is_rising_now = (chg_pct > 0) or (curr_close > ma20 and ma5 >= ma20)
+            is_up_trend = (curr_close > ma20) and (ma20 >= ma60)
+
             supply = get_investor_supply(ticker)
             big_money = (supply['inst'] + supply['frgn']) if supply else 0
 
             fund_data, _ = get_single_fundamental(ticker)
             pbr_val = round(fund_data.get('PBR', 0), 2) if fund_data else 0
+            per_val = round(fund_data.get('PER', 0), 1) if fund_data else 0
 
             dart_res = check_dart_performance(dart_api_key, ticker)
             is_deficit = (dart_res["status"] == "success" and dart_res['curr_op'] <= 0)
             is_earnings_up = (dart_res["status"] == "success" and dart_res['op_diff'] > 0)
             is_profitable = (dart_res["status"] == "success" and dart_res['curr_op'] > 0)
 
+            # 4단계 안전 판정 라벨 부여
             if is_deficit:
-                continue
+                status_badge = "🔴 위험 (적자)"
+                summary = "주가 상승 중이나 영업이익 적자 기업"
+                priority = 3
+            elif is_earnings_up and is_up_trend and big_money > 0:
+                status_badge = "🟢 적극 검토"
+                summary = "실적성장 + 큰손매수 + 상승추세 일치"
+                priority = 1
+            elif (is_earnings_up or is_profitable) and (0 < pbr_val <= 1.3) and not is_up_trend:
+                status_badge = "🔵 저평가 분할매수"
+                summary = "실적·저평가 우량주 (눌림목 반등 시도)"
+                priority = 2
+            elif is_up_trend and big_money > 0:
+                status_badge = "🟢 수급·추세 우수"
+                summary = "기관·외국인 매수 유입 + 차트 정배열"
+                priority = 1
+            else:
+                status_badge = "🟡 관망 추천"
+                if big_money < 0 and is_earnings_up:
+                    summary = "실적 양호·차트 상승이나 큰손 매도 우위"
+                elif per_val > 30:
+                    summary = f"단기 상승세이나 고평가 주의 (PER {per_val:.0f}배)"
+                else:
+                    summary = "단기 반등 중이나 큰손 수급·추세 확인 필요"
+                priority = 2
 
-            is_up_trend = (curr_close >= ma20) and (ma5 >= ma20 or ma20 >= ma60)
-
-            row_base = {
+            row = {
                 "종목코드": ticker,
                 "종목명": name,
+                "안전판정": status_badge,
                 "현재가": f"{curr_close:,}원",
                 "등락률": f"{chg_pct:+.1f}%",
                 "큰손수급(5일)": f"{big_money:+,.0f}억" if supply else "-",
-                "PBR": f"{pbr_val:.2f}배" if pbr_val > 0 else "-",
+                "PER/PBR": f"{per_val:.1f} / {pbr_val:.2f}" if (per_val > 0 or pbr_val > 0) else "-",
+                "진단요약": summary,
+                "_priority": priority,
+                "_chg": chg_pct
             }
 
-            if is_earnings_up and is_up_trend and big_money > 0:
-                primary_results.append({
-                    **row_base,
-                    "판정": "🟢 적극 검토",
-                    "추천이유": "실적성장 + 큰손매수 + 상승추세",
-                    "_score": 100 + big_money
-                })
-            elif is_up_trend and big_money > 0:
-                primary_results.append({
-                    **row_base,
-                    "판정": "🟢 수급·추세 우수",
-                    "추천이유": "기관·외국인 매수 유입",
-                    "_score": 70 + big_money
-                })
-            elif (is_earnings_up or is_profitable) and (0 < pbr_val <= 1.3):
-                growth_bonus = max(dart_res.get('op_growth', 0), 0) * 0.2 if dart_res["status"] == "success" else 0
-                val_score = (1.5 - pbr_val) * 30 + growth_bonus
-                reason_txt = "실적성장 + 저평가 눌림목" if is_earnings_up else f"흑자 우량주 + 저평가(PBR {pbr_val:.2f})"
-                value_backups.append({
-                    **row_base,
-                    "판정": "🔵 저평가 분할매수",
-                    "추천이유": reason_txt,
-                    "_score": val_score
-                })
+            if is_rising_now:
+                rising_list.append(row)
+            else:
+                fallback_list.append(row)
         except Exception:
             continue
 
-    primary_results.sort(key=lambda x: x["_score"], reverse=True)
-    value_backups.sort(key=lambda x: x["_score"], reverse=True)
+    # 상승 중인 종목을 우선 정렬 (안전 등급 우선 -> 등락률 순)
+    rising_list.sort(key=lambda x: (x["_priority"], -x["_chg"]))
+    fallback_list.sort(key=lambda x: (x["_priority"], -x["_chg"]))
 
-    combined = primary_results[:5]
+    combined = rising_list[:10]
     if len(combined) < 5:
-        combined.extend(value_backups[:5 - len(combined)])
+        combined.extend(fallback_list[:5 - len(combined)])
 
     if not combined:
         return pd.DataFrame(), bday
 
-    return pd.DataFrame(combined).drop(columns=["_score"]), bday
+    return pd.DataFrame(combined).drop(columns=["_priority", "_chg"]), bday
 
-# 7. 상세 진단 화면 렌더링
+# 8. 상세 진단 화면 렌더링
 def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     fund_data, _ = get_single_fundamental(ticker)
     supply = get_investor_supply(ticker)
@@ -425,7 +444,6 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
         for r in tech_reasons:
             st.markdown(f"- {r}")
 
-    # [중단] 핵심 숫자 4개 (영업이익 + 큰손수급 + PER + PBR 모두 표시)
     st.divider()
     m1, m2, m3, m4 = st.columns(4)
     if dart_res["status"] == "success":
@@ -441,7 +459,6 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     m3.metric("PER (주가수익비율)", f"{per_val:.1f} 배" if per_val > 0 else "-")
     m4.metric("PBR (1이하면 저평가)", f"{pbr_val:.2f} 배" if pbr_val > 0 else "-")
 
-    # [하단] 일봉 + 이동평균선 차트
     fig = go.Figure()
     candle = go.Candlestick(
         x=ohlcv.index, open=ohlcv['Open'], high=ohlcv['High'], low=ohlcv['Low'], close=ohlcv['Close'],
@@ -492,27 +509,31 @@ with st.sidebar:
         dart_api_key = st.text_input("OpenDART API Key", type="password")
 
 # 메인 화면 탭
-tab1, tab2 = st.tabs(["⚡ 오늘의 안전 추천주 (자동선별)", "🔍 원하는 종목 직접 검색"])
+tab1, tab2 = st.tabs(["⚡ 오늘의 상승주 & 안전 진단", "🔍 원하는 종목 직접 검색"])
 
 with tab1:
-    st.markdown("상승 추세 수급주와 **하락장에서도 튼튼한 저평가 우량주 TOP 5**를 자동으로 골라줍니다.")
+    st.markdown("현재 **상승 흐름을 타는 종목**들을 나열하고, 옆에 **안전(🟢)·관망(🟡)·위험(🔴) 판정**을 함께 보여줍니다.")
     market_sel = st.radio("시장 선택", ["KOSPI", "KOSDAQ"], horizontal=True)
 
-    with st.spinner("공식 데이터로 안전한 추천 종목을 자동 선별하는 중입니다..."):
-        df_rec, bday_str = get_auto_recommended_stocks(dart_api_key, market_sel)
+    with st.spinner("현재 상승 중인 종목들의 실적과 큰손 수급을 진단하는 중입니다..."):
+        df_board, bday_str = get_rising_stocks_board(dart_api_key, market_sel)
 
-    st.caption(f"기준일: {bday_str} (적자 기업 및 고평가 거품주 자동 제외됨)")
+    st.caption(f"기준일: {bday_str} (겉으로 주가가 올라도 적자이거나 큰손이 팔고 있으면 '위험/관망'으로 경고합니다)")
 
-    if df_rec.empty:
-        st.warning("현재 조건을 만족하는 종목을 불러오지 못했습니다. 잠시 후 다시 시도하거나 두 번째 탭에서 직접 검색해 주세요.")
+    if df_board.empty:
+        st.warning("현재 시장 데이터를 불러오지 못했습니다. 잠시 후 다시 시도하거나 두 번째 탭에서 직접 검색해 주세요.")
     else:
-        st.dataframe(df_rec[['종목명', '판정', '현재가', '등락률', '큰손수급(5일)', 'PBR', '추천이유']], use_container_width=True, hide_index=True)
+        st.dataframe(
+            df_board[['종목명', '안전판정', '현재가', '등락률', '큰손수급(5일)', 'PER/PBR', '진단요약']],
+            use_container_width=True,
+            hide_index=True
+        )
 
-        rec_names = df_rec['종목명'].tolist()
+        rec_names = df_board['종목명'].tolist()
         selected_rec = st.radio("👇 아래에서 종목을 누르면 상세 진단과 차트가 열립니다", rec_names, horizontal=True)
         if selected_rec:
-            rec_row = df_rec[df_rec['종목명'] == selected_rec].iloc[0]
-            render_stock_analysis(rec_row['종목코드'], rec_row['종목명'], dart_api_key, tab_id="auto_rec")
+            rec_row = df_board[df_board['종목명'] == selected_rec].iloc[0]
+            render_stock_analysis(rec_row['종목코드'], rec_row['종목명'], dart_api_key, tab_id="rising_board")
 
 with tab2:
     all_tickers = get_all_tickers()
