@@ -24,34 +24,60 @@ CORE_BLUECHIPS = [
     ("030200", "KT"), ("015760", "한국전력")
 ]
 
-# 1. 전체 상장 종목 마스터 불러오기
+# 선물·ETF·ETN·스팩·우선주 판별 필터 함수
+EXCLUDE_KEYWORDS = [
+    "선물", "F 20", "F20", "코스피", "코스닥", "지수", "레버리지", "인버스",
+    "ETN", "ETF", "스팩", "리츠", "KODEX", "TIGER", "KBSTAR", "RISE",
+    "ACE", "SOL", "PLUS", "HANARO", "KOSEF", "ARIRANG", "TIMEFOLIO",
+    "WOORI", "BNK", "히어로즈", "파워", "마이티", "FOCUS", "VITA"
+]
+
+def is_pure_common_stock(code, name):
+    code_str = str(code).strip()
+    name_str = str(name).strip()
+    # 6자리 순수 숫자 + 보통주(끝자리 0)만 허용 (선물코드/우선주 제외)
+    if len(code_str) != 6 or not code_str.isdigit() or not code_str.endswith("0"):
+        return False
+    # 선물·ETF·스팩 키워드 제외
+    if any(kw in name_str.upper() for kw in EXCLUDE_KEYWORDS):
+        return False
+    return True
+
+# 1. 전체 상장 종목 마스터 불러오기 (순수 보통주만 필터링)
 @st.cache_data(ttl=86400)
 def get_all_tickers():
+    df_res = pd.DataFrame()
     try:
         df_krx = fdr.StockListing('KRX')
         if not df_krx.empty and 'Code' in df_krx.columns:
-            return df_krx[df_krx['Code'].str.len() == 6][['Code', 'Name']]
+            df_res = df_krx[['Code', 'Name']]
     except Exception:
         pass
 
-    try:
-        df_desc = fdr.StockListing('KRX-DESC')
-        if not df_desc.empty and 'Code' in df_desc.columns:
-            return df_desc[df_desc['Code'].str.len() == 6][['Code', 'Name']]
-    except Exception:
-        pass
+    if df_res.empty:
+        try:
+            df_desc = fdr.StockListing('KRX-DESC')
+            if not df_desc.empty and 'Code' in df_desc.columns:
+                df_res = df_desc[['Code', 'Name']]
+        except Exception:
+            pass
 
-    try:
-        rows = []
-        for mkt in ["KOSPI", "KOSDAQ"]:
-            for t in stock.get_market_ticker_list(market=mkt):
-                rows.append({"Code": t, "Name": stock.get_market_ticker_name(t)})
-        if rows:
-            return pd.DataFrame(rows)
-    except Exception:
-        pass
+    if df_res.empty:
+        try:
+            rows = []
+            for mkt in ["KOSPI", "KOSDAQ"]:
+                for t in stock.get_market_ticker_list(market=mkt):
+                    rows.append({"Code": t, "Name": stock.get_market_ticker_name(t)})
+            if rows:
+                df_res = pd.DataFrame(rows)
+        except Exception:
+            pass
 
-    return pd.DataFrame(CORE_BLUECHIPS, columns=["Code", "Name"])
+    if df_res.empty:
+        df_res = pd.DataFrame(CORE_BLUECHIPS, columns=["Code", "Name"])
+
+    mask = [is_pure_common_stock(c, n) for c, n in zip(df_res['Code'], df_res['Name'])]
+    return df_res[mask].reset_index(drop=True)
 
 # 2. 최근 영업일 탐색
 @st.cache_data(ttl=3600)
@@ -188,15 +214,14 @@ def check_dart_performance(api_key, ticker):
     except Exception:
         return {"status": "error"}
 
-# 6. 네이버 모바일 상승률/거래상위 종목 실시간 확보 (클라우드 IP 100% 작동)
+# 6. 네이버 모바일 상승률/시가총액 상위 순수 기업 종목만 확보
 @st.cache_data(ttl=900)
 def get_market_movers(market="KOSPI"):
     movers = []
     seen = set()
-    # 네이버 모바일 시가총액 상위 및 상승률 상위 API
     endpoints = [
-        f"https://m.stock.naver.com/api/stocks/up/{market}?page=1&pageSize=20",
-        f"https://m.stock.naver.com/api/stocks/marketValue/{market}?page=1&pageSize=20"
+        f"https://m.stock.naver.com/api/stocks/up/{market}?page=1&pageSize=30",
+        f"https://m.stock.naver.com/api/stocks/marketValue/{market}?page=1&pageSize=30"
     ]
     for url in endpoints:
         try:
@@ -205,10 +230,8 @@ def get_market_movers(market="KOSPI"):
             for s in stocks:
                 code = s.get("itemCode", "")
                 name = s.get("stockName", "")
-                # ETF/ETN/스팩 제외 (6자리 일반 종목 위주)
-                if len(code) == 6 and code.isdigit() and code not in seen:
-                    if any(k in name for k in ["KODEX", "TIGER", "KBSTAR", "ACE", "SOL", "스팩", "ETN"]):
-                        continue
+                # 선물지수, ETF, ETN, 스팩, 우선주 완벽 제외
+                if code not in seen and is_pure_common_stock(code, name):
                     movers.append((code, name))
                     seen.add(code)
         except Exception:
@@ -243,7 +266,6 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
             prev_close = int(ohlcv['Close'].iloc[-2])
             chg_pct = round((curr_close - prev_close) / prev_close * 100, 1)
 
-            # 상승 흐름 판별: 당일 상승 중이거나 20일 이동평균선 위 상승 추세
             is_rising_now = (chg_pct > 0) or (curr_close > ma20 and ma5 >= ma20)
             is_up_trend = (curr_close > ma20) and (ma20 >= ma60)
 
@@ -259,7 +281,6 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
             is_earnings_up = (dart_res["status"] == "success" and dart_res['op_diff'] > 0)
             is_profitable = (dart_res["status"] == "success" and dart_res['curr_op'] > 0)
 
-            # 4단계 안전 판정 라벨 부여
             if is_deficit:
                 status_badge = "🔴 위험 (적자)"
                 summary = "주가 상승 중이나 영업이익 적자 기업"
@@ -306,7 +327,6 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
         except Exception:
             continue
 
-    # 상승 중인 종목을 우선 정렬 (안전 등급 우선 -> 등락률 순)
     rising_list.sort(key=lambda x: (x["_priority"], -x["_chg"]))
     fallback_list.sort(key=lambda x: (x["_priority"], -x["_chg"]))
 
@@ -512,13 +532,13 @@ with st.sidebar:
 tab1, tab2 = st.tabs(["⚡ 오늘의 상승주 & 안전 진단", "🔍 원하는 종목 직접 검색"])
 
 with tab1:
-    st.markdown("현재 **상승 흐름을 타는 종목**들을 나열하고, 옆에 **안전(🟢)·관망(🟡)·위험(🔴) 판정**을 함께 보여줍니다.")
+    st.markdown("현재 **상승 흐름을 타는 기업 종목**들을 나열하고, 옆에 **안전(🟢)·관망(🟡)·위험(🔴) 판정**을 함께 보여줍니다.")
     market_sel = st.radio("시장 선택", ["KOSPI", "KOSDAQ"], horizontal=True)
 
-    with st.spinner("현재 상승 중인 종목들의 실적과 큰손 수급을 진단하는 중입니다..."):
+    with st.spinner("현재 상승 중인 기업들의 실적과 큰손 수급을 진단하는 중입니다..."):
         df_board, bday_str = get_rising_stocks_board(dart_api_key, market_sel)
 
-    st.caption(f"기준일: {bday_str} (겉으로 주가가 올라도 적자이거나 큰손이 팔고 있으면 '위험/관망'으로 경고합니다)")
+    st.caption(f"기준일: {bday_str} (선물·ETF·스팩 제외 / 겉으로 주가가 올라도 적자이거나 큰손이 팔고 있으면 '위험/관망'으로 경고합니다)")
 
     if df_board.empty:
         st.warning("현재 시장 데이터를 불러오지 못했습니다. 잠시 후 다시 시도하거나 두 번째 탭에서 직접 검색해 주세요.")
