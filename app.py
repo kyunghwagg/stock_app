@@ -35,10 +35,8 @@ EXCLUDE_KEYWORDS = [
 def is_pure_common_stock(code, name):
     code_str = str(code).strip()
     name_str = str(name).strip()
-    # 6자리 순수 숫자 + 보통주(끝자리 0)만 허용 (선물코드/우선주 제외)
     if len(code_str) != 6 or not code_str.isdigit() or not code_str.endswith("0"):
         return False
-    # 선물·ETF·스팩 키워드 제외
     if any(kw in name_str.upper() for kw in EXCLUDE_KEYWORDS):
         return False
     return True
@@ -214,13 +212,13 @@ def check_dart_performance(api_key, ticker):
     except Exception:
         return {"status": "error"}
 
-# 6. 네이버 모바일 상승률/시가총액 상위 순수 기업 종목만 확보
+# 6. 네이버 모바일 상승률/시가총액 상위 순수 기업 종목 25개 확보
 @st.cache_data(ttl=900)
 def get_market_movers(market="KOSPI"):
     movers = []
     seen = set()
     endpoints = [
-        f"https://m.stock.naver.com/api/stocks/up/{market}?page=1&pageSize=30",
+        f"https://m.stock.naver.com/api/stocks/up/{market}?page=1&pageSize=40",
         f"https://m.stock.naver.com/api/stocks/marketValue/{market}?page=1&pageSize=30"
     ]
     for url in endpoints:
@@ -230,7 +228,6 @@ def get_market_movers(market="KOSPI"):
             for s in stocks:
                 code = s.get("itemCode", "")
                 name = s.get("stockName", "")
-                # 선물지수, ETF, ETN, 스팩, 우선주 완벽 제외
                 if code not in seen and is_pure_common_stock(code, name):
                     movers.append((code, name))
                     seen.add(code)
@@ -239,9 +236,9 @@ def get_market_movers(market="KOSPI"):
 
     if not movers and market == "KOSPI":
         return CORE_BLUECHIPS
-    return movers[:18]
+    return movers[:25]
 
-# 7. [오늘의 시장 흐름 & 안전 진단] 상승중인 주식 나열 + 안전/관망/위험 판정
+# 7. [오늘의 시장 흐름 & 안전 진단] 상승중인 주식 10~15개 나열 + 안전/관망/위험 판정
 @st.cache_data(ttl=900)
 def get_rising_stocks_board(dart_api_key, market="KOSPI"):
     bday = get_latest_bday()
@@ -330,9 +327,10 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
     rising_list.sort(key=lambda x: (x["_priority"], -x["_chg"]))
     fallback_list.sort(key=lambda x: (x["_priority"], -x["_chg"]))
 
-    combined = rising_list[:10]
-    if len(combined) < 5:
-        combined.extend(fallback_list[:5 - len(combined)])
+    # 최대 15개까지 표시 (상승 종목이 12개 미만이면 우량주 보충 리스트로 12개 이상 채움)
+    combined = rising_list[:15]
+    if len(combined) < 12:
+        combined.extend(fallback_list[:12 - len(combined)])
 
     if not combined:
         return pd.DataFrame(), bday
@@ -532,10 +530,10 @@ with st.sidebar:
 tab1, tab2 = st.tabs(["⚡ 오늘의 상승주 & 안전 진단", "🔍 원하는 종목 직접 검색"])
 
 with tab1:
-    st.markdown("현재 **상승 흐름을 타는 기업 종목**들을 나열하고, 옆에 **안전(🟢)·관망(🟡)·위험(🔴) 판정**을 함께 보여줍니다.")
+    st.markdown("현재 **상승 흐름을 타는 기업 종목(12~15개)**을 나열하고, 옆에 **안전(🟢)·관망(🟡)·위험(🔴) 판정**을 함께 보여줍니다.")
     market_sel = st.radio("시장 선택", ["KOSPI", "KOSDAQ"], horizontal=True)
 
-    with st.spinner("현재 상승 중인 기업들의 실적과 큰손 수급을 진단하는 중입니다..."):
+    with st.spinner("현재 상승 중인 기업 15곳의 실적과 큰손 수급을 진단하는 중입니다..."):
         df_board, bday_str = get_rising_stocks_board(dart_api_key, market_sel)
 
     st.caption(f"기준일: {bday_str} (선물·ETF·스팩 제외 / 겉으로 주가가 올라도 적자이거나 큰손이 팔고 있으면 '위험/관망'으로 경고합니다)")
@@ -546,13 +544,14 @@ with tab1:
         st.dataframe(
             df_board[['종목명', '안전판정', '현재가', '등락률', '큰손수급(5일)', 'PER/PBR', '진단요약']],
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            height=460
         )
 
-        rec_names = df_board['종목명'].tolist()
-        selected_rec = st.radio("👇 아래에서 종목을 누르면 상세 진단과 차트가 열립니다", rec_names, horizontal=True)
-        if selected_rec:
-            rec_row = df_board[df_board['종목명'] == selected_rec].iloc[0]
+        df_board['SelectLabel'] = df_board['종목명'] + " (" + df_board['안전판정'] + ")"
+        sel_label = st.selectbox("👇 아래에서 종목을 선택하면 상세 진단과 차트가 열립니다", df_board['SelectLabel'].tolist())
+        if sel_label:
+            rec_row = df_board[df_board['SelectLabel'] == sel_label].iloc[0]
             render_stock_analysis(rec_row['종목코드'], rec_row['종목명'], dart_api_key, tab_id="rising_board")
 
 with tab2:
