@@ -40,16 +40,24 @@ def is_pure_common_stock(code, name):
         return False
     return True
 
+<<<<<<< HEAD
 # 0. [실시간 개선] 코스피 시장 온도계 (네이버 모바일 실시간 지수 + 60일 이평선 비교)
 @st.cache_data(ttl=300)
 def get_kospi_temperature():
     try:
         # 1) 60일 이동평균선 계산용 과거 일봉
+=======
+# 0. [신규] 코스피 시장 온도계 (전체 시장 과열/침체 여부 1줄 요약)
+@st.cache_data(ttl=1800)
+def get_kospi_temperature():
+    try:
+>>>>>>> e7b173ff422f64e9ad58cfc4c5e4f0a7ef2c326c
         end_dt = datetime.today()
         start_dt = end_dt - timedelta(days=150)
         df_ks = fdr.DataReader("KS11", start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
         if df_ks.empty or len(df_ks) < 60:
             return None
+<<<<<<< HEAD
 
         # 2) 실시간 현재 지수 (네이버 증권 모바일 API)
         curr = float(df_ks['Close'].iloc[-1])
@@ -69,6 +77,12 @@ def get_kospi_temperature():
         ma60 = (sum(recent_59) + curr) / len(recent_59 + [curr])
         diff_pct = (curr - ma60) / ma60 * 100
         return {"curr": curr, "diff_pct": diff_pct, "chg_ratio": chg_ratio}
+=======
+        curr = float(df_ks['Close'].iloc[-1])
+        ma60 = float(df_ks['Close'].rolling(60).mean().iloc[-1])
+        diff_pct = (curr - ma60) / ma60 * 100
+        return {"curr": curr, "diff_pct": diff_pct}
+>>>>>>> e7b173ff422f64e9ad58cfc4c5e4f0a7ef2c326c
     except Exception:
         return None
 
@@ -595,6 +609,7 @@ kospi_temp = get_kospi_temperature()
 if kospi_temp:
     diff = kospi_temp['diff_pct']
     curr_ks = kospi_temp['curr']
+<<<<<<< HEAD
     chg_r = kospi_temp.get('chg_ratio', 0.0)
     header_txt = f"🌡️ **오늘의 코스피 실시간 지수 ({curr_ks:,.2f}pt, {chg_r:+.2f}%)"
     if diff <= -3.0:
@@ -603,6 +618,14 @@ if kospi_temp:
         st.warning(f"{header_txt}: [단기 과열 구간]** — 3개월 평균보다 {diff:.1f}% 높아 추격 매수를 자제하세요.")
     else:
         st.success(f"{header_txt}: [적정 안정 구간]** — 시장이 큰 무리 없이 정상 범위에서 움직이고 있습니다.")
+=======
+    if diff <= -3.0:
+        st.info(f"🌡️ **오늘의 코스피 시장 온도 ({curr_ks:,.0f}pt): [저평가 침체 구간]** — 3개월 평균보다 {abs(diff):.1f}% 낮아 우량주를 천천히 모아가기 좋은 시기입니다.")
+    elif diff >= 5.0:
+        st.warning(f"🌡️ **오늘의 코스피 시장 온도 ({curr_ks:,.0f}pt): [단기 과열 구간]** — 3개월 평균보다 {diff:.1f}% 높아 추격 매수를 자제하세요.")
+    else:
+        st.success(f"🌡️ **오늘의 코스피 시장 온도 ({curr_ks:,.0f}pt): [적정 안정 구간]** — 시장이 큰 무리 없이 정상 범위에서 움직이고 있습니다.")
+>>>>>>> e7b173ff422f64e9ad58cfc4c5e4f0a7ef2c326c
 
 # 메인 화면 탭
 tab1, tab2 = st.tabs(["⚡ 오늘의 상승주 & 안전 진단", "🔍 원하는 종목 직접 검색"])
