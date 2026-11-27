@@ -40,6 +40,38 @@ def is_pure_common_stock(code, name):
         return False
     return True
 
+# 0. [실시간 개선] 코스피 시장 온도계 (네이버 모바일 실시간 지수 + 60일 이평선 비교)
+@st.cache_data(ttl=300)
+def get_kospi_temperature():
+    try:
+        # 1) 60일 이동평균선 계산용 과거 일봉
+        end_dt = datetime.today()
+        start_dt = end_dt - timedelta(days=150)
+        df_ks = fdr.DataReader("KS11", start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
+        if df_ks.empty or len(df_ks) < 60:
+            return None
+
+        # 2) 실시간 현재 지수 (네이버 증권 모바일 API)
+        curr = float(df_ks['Close'].iloc[-1])
+        chg_ratio = 0.0
+        try:
+            url = "https://m.stock.naver.com/api/index/KOSPI/basic"
+            res = requests.get(url, headers=HEADERS, timeout=4).json()
+            live_price = float(str(res.get("closePrice", "0")).replace(",", ""))
+            if live_price > 0:
+                curr = live_price
+            chg_ratio = float(str(res.get("fluctuationsRatio", "0")).replace(",", ""))
+        except Exception:
+            pass
+
+        # 최근 59일 종가 + 실시간 현재 지수로 60일 평균 계산
+        recent_59 = df_ks['Close'].iloc[-59:].tolist()
+        ma60 = (sum(recent_59) + curr) / len(recent_59 + [curr])
+        diff_pct = (curr - ma60) / ma60 * 100
+        return {"curr": curr, "diff_pct": diff_pct, "chg_ratio": chg_ratio}
+    except Exception:
+        return None
+
 # 1. 전체 상장 종목 마스터 불러오기
 @st.cache_data(ttl=86400)
 def get_all_tickers():
@@ -89,7 +121,7 @@ def get_latest_bday():
             continue
     return datetime.today().strftime("%Y%m%d")
 
-# 3. 기관·외국인 최근 5일 수급 조회
+# 3. 기관·외국인 최근 5일 수급 조회 (네이버 증권 모바일 JSON API + pykrx)
 @st.cache_data(ttl=1800)
 def _fetch_naver_supply_cached(ticker):
     url = f"https://m.stock.naver.com/api/stock/{ticker}/trend"
@@ -130,7 +162,7 @@ def get_investor_supply(ticker):
         pass
     return None
 
-# 4. 개별 종목 PER·PBR 조회
+# 4. 개별 종목 PER·PBR 조회 (네이버 증권 모바일 JSON API + pykrx)
 @st.cache_data(ttl=3600)
 def _fetch_naver_fund_cached(ticker):
     url = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
@@ -237,7 +269,7 @@ def get_market_movers(market="KOSPI"):
         return CORE_BLUECHIPS
     return movers[:25]
 
-# 7. [오늘의 시장 흐름 & 안전 진단] 상승중인 주식 10~15개 나열
+# 7. [오늘의 상승주 & 안전 진단] 상승중인 주식 12~15개 나열
 @st.cache_data(ttl=900)
 def get_rising_stocks_board(dart_api_key, market="KOSPI"):
     bday = get_latest_bday()
@@ -276,6 +308,10 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
             is_deficit = (dart_res["status"] == "success" and dart_res['curr_op'] <= 0)
             is_earnings_up = (dart_res["status"] == "success" and dart_res['op_diff'] > 0)
             is_profitable = (dart_res["status"] == "success" and dart_res['curr_op'] > 0)
+            op_growth = dart_res.get('op_growth', 0) if dart_res["status"] == "success" else 0
+
+            # 가치·성장주 저평가 판정 (PBR 저평가 OR 고성장·저PER)
+            is_value_good = (0 < pbr_val <= 1.3) or (op_growth >= 30 and 0 < per_val <= 20)
 
             if is_deficit:
                 status_badge = "🔴 위험(적자)"
@@ -285,9 +321,9 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
                 status_badge = "🟢 적극 검토"
                 summary = "실적성장 + 큰손매수 + 상승추세 일치"
                 priority = 1
-            elif (is_earnings_up or is_profitable) and (0 < pbr_val <= 1.3) and not is_up_trend:
+            elif (is_earnings_up or is_profitable) and is_value_good and not is_up_trend:
                 status_badge = "🔵 분할매수 기회"
-                summary = "실적·저평가 우량주 (눌림목 반등 시도)"
+                summary = "실적·가치 우량주 (눌림목 반등 시도)"
                 priority = 2
             elif is_up_trend and big_money > 0:
                 status_badge = "🟢 수급·추세 우수"
@@ -335,14 +371,14 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
 
     return pd.DataFrame(combined).drop(columns=["_priority", "_chg"]), bday
 
-# 8. 상세 진단 화면 렌더링
+# 8. 상세 진단 화면 렌더링 (1년 주가 위치 밴드 + 성장주 PER 평가 반영)
 def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     fund_data, _ = get_single_fundamental(ticker)
     supply = get_investor_supply(ticker)
     dart_res = check_dart_performance(dart_api_key, ticker)
 
     end_dt = datetime.today()
-    start_dt = end_dt - timedelta(days=250)
+    start_dt = end_dt - timedelta(days=365)  # 1년(52주) 주가 범위 계산을 위해 365일 조회
     try:
         ohlcv = fdr.DataReader(ticker, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
     except Exception:
@@ -366,20 +402,32 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
             st.info(f"📊 최근 실적({dart_res['period']}): 영업이익 {dart_res['curr_op']/100_000_000:,.1f}억 원 ({dart_res['op_growth']:+.1f}%)")
         return
 
+    # 1년(52주) 주가 밴드 위치 계산 (하단 0% ~ 상단 100%)
+    year_high = float(ohlcv['High'].max())
+    year_low = float(ohlcv['Low'].min())
+    curr_price = float(latest['Close'])
+    if year_high > year_low:
+        band_pct = int(round((curr_price - year_low) / (year_high - year_low) * 100))
+    else:
+        band_pct = 50
+    band_pct = max(0, min(100, band_pct))
+
+    # 차트 렌더링용 최근 180거래일 슬라이싱
+    chart_df = ohlcv.tail(180).copy()
     for ma in [5, 20, 60, 120]:
-        ohlcv[f'MA{ma}'] = ohlcv['Close'].rolling(window=ma).mean()
+        chart_df[f'MA{ma}'] = ohlcv['Close'].rolling(window=ma).mean().tail(180)
 
-    body = (ohlcv['Close'] - ohlcv['Open']).abs()
-    lower_shadow = ohlcv[['Open', 'Close']].min(axis=1) - ohlcv['Low']
-    upper_shadow = ohlcv['High'] - ohlcv[['Open', 'Close']].max(axis=1)
-    ohlcv['Hammer'] = (lower_shadow >= body * 2) & (upper_shadow <= body * 0.5) & (body > 0)
+    body = (chart_df['Close'] - chart_df['Open']).abs()
+    lower_shadow = chart_df[['Open', 'Close']].min(axis=1) - chart_df['Low']
+    upper_shadow = chart_df['High'] - chart_df[['Open', 'Close']].max(axis=1)
+    chart_df['Hammer'] = (lower_shadow >= body * 2) & (upper_shadow <= body * 0.5) & (body > 0)
 
-    ohlcv['Prev_Close'] = ohlcv['Close'].shift(1)
-    ohlcv['Vol_MA20'] = ohlcv['Volume'].rolling(window=20).mean()
-    ohlcv['Gap_Surge'] = (ohlcv['Open'] >= ohlcv['Prev_Close'] * 1.01) & (ohlcv['Close'] > ohlcv['Open']) & (ohlcv['Volume'] >= ohlcv['Vol_MA20'] * 1.5)
+    chart_df['Prev_Close'] = chart_df['Close'].shift(1)
+    chart_df['Vol_MA20'] = chart_df['Volume'].rolling(window=20).mean()
+    chart_df['Gap_Surge'] = (chart_df['Open'] >= chart_df['Prev_Close'] * 1.01) & (chart_df['Close'] > chart_df['Open']) & (chart_df['Volume'] >= chart_df['Vol_MA20'] * 1.5)
 
-    latest = ohlcv.iloc[-1]
-    prev = ohlcv.iloc[-2]
+    latest = chart_df.iloc[-1]
+    prev = chart_df.iloc[-2]
     is_aligned = (latest['MA5'] > latest['MA20'] > latest['MA60'] > latest['MA120'])
     is_mid_up = (latest['Close'] > latest['MA20']) and (latest['MA20'] > latest['MA60'])
     is_golden = (prev['MA5'] <= prev['MA20']) and (latest['MA5'] > latest['MA20'])
@@ -391,30 +439,37 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     is_profitable = False
     is_undervalued = False
     is_big_buying = False
+    op_growth = 0.0
 
     if dart_res["status"] == "success":
+        op_growth = dart_res['op_growth']
         if dart_res['curr_op'] <= 0:
             is_deficit = True
             fund_reasons.append(f"❌ 영업이익 적자 ({dart_res['period']})")
         elif dart_res['op_diff'] > 0:
             is_earnings_up = True
             is_profitable = True
-            fund_reasons.append(f"✅ 영업이익 전년 대비 {dart_res['op_growth']:+.0f}% 성장 ({dart_res['period']})")
+            fund_reasons.append(f"✅ 영업이익 전년 대비 {op_growth:+.0f}% 성장 ({dart_res['period']})")
         else:
             is_profitable = True
-            fund_reasons.append(f"⚠️ 흑자 유지 중이나 이익 감소 ({dart_res['op_growth']:+.0f}%)")
+            fund_reasons.append(f"⚠️ 흑자 유지 중이나 이익 감소 ({op_growth:+.0f}%)")
     else:
         fund_reasons.append("ℹ️ 공시 실적 데이터 미확인")
 
     pbr_val = fund_data.get('PBR', 0) if fund_data else 0
     per_val = fund_data.get('PER', 0) if fund_data else 0
+
+    # 업종별 가치 판단: PBR 저평가 OR 고성장+합리적 PER 구제
     if 0 < pbr_val <= 1.3:
         is_undervalued = True
         fund_reasons.append(f"✅ 자산 대비 저평가 (PBR {pbr_val:.2f}배)")
+    elif op_growth >= 30 and 0 < per_val <= 20:
+        is_undervalued = True
+        fund_reasons.append(f"✅ 실적 고성장 대비 저PER 우량주 (PER {per_val:.1f}배)")
     elif 1.3 < pbr_val <= 2.5:
         fund_reasons.append(f"🆗 적정 주가 수준 (PBR {pbr_val:.2f}배)")
     elif pbr_val > 2.5:
-        fund_reasons.append(f"⚠️ 고평가 구간 주의 (PBR {pbr_val:.2f}배)")
+        fund_reasons.append(f"⚠️ 자산 대비 높은 주가 수준 (PBR {pbr_val:.2f}배)")
 
     if supply:
         big_money = supply['inst'] + supply['frgn']
@@ -444,7 +499,7 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     elif is_earnings_up and (is_aligned or is_mid_up) and is_big_buying:
         st.success("### 🟢 [적극 검토] 실적·수급·추세 3박자 우수\n이익이 늘고 큰손도 매수 중인 건강한 상승 흐름입니다. (분할 매수 검토)")
     elif (is_earnings_up or is_profitable) and is_undervalued and not (is_aligned or is_mid_up):
-        st.info("### 🔵 [저평가 분할매수 기회] 실적 튼튼·장세 영향 눌림목\n회사는 흑자를 내는 저평가 우량주이나, 시장 분위기로 주가만 쉬어가는 중입니다. (천천히 나눠서 매수 검토)")
+        st.info("### 🔵 [저평가 분할매수 기회] 실적 튼튼·장세 영향 눌림목\n회사는 흑자를 내는 우량주이나, 시장 분위기로 주가만 쉬어가는 중입니다. (천천히 나눠서 매수 검토)")
     elif (is_aligned or is_mid_up) and is_big_buying and not is_earnings_up:
         st.warning("### 🟡 [단기 수급주 / 주의] 차트·수급은 좋으나 실적 확인 필요\n큰손 매수세로 오르고 있으나 이익 성장이 약합니다. -10% 손절선을 꼭 지키세요.")
     else:
@@ -475,26 +530,37 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     m3.metric("PER (주가수익비율)", f"{per_val:.1f} 배" if per_val > 0 else "-")
     m4.metric("PBR (1이하면 저평가)", f"{pbr_val:.2f} 배" if pbr_val > 0 else "-")
 
+    # [신규] 1년 주가 위치 밴드 게이지 (적정가 하단~상단 위치 시각화)
+    if band_pct <= 25:
+        band_msg = f"🟢 **1년 범위 중 하위 {band_pct}% (바닥권·저평가 구간)** — 1년 최저가({int(year_low):,}원) 부근입니다."
+    elif band_pct >= 80:
+        band_msg = f"🟠 **1년 범위 중 상위 {band_pct}% (고점 부근·단기 과열 주의)** — 1년 최고가({int(year_high):,}원)에 가깝습니다."
+    else:
+        band_msg = f"🔵 **1년 범위 중 {band_pct}% 위치 (적정 중간 구간)** — 최저 {int(year_low):,}원 ~ 최고 {int(year_high):,}원 사이입니다."
+    st.markdown(f"📏 **1년 주가 위치:** {band_msg}")
+    st.progress(band_pct / 100)
+
+    # 일봉 + 이동평균선 차트
     fig = go.Figure()
     candle = go.Candlestick(
-        x=ohlcv.index, open=ohlcv['Open'], high=ohlcv['High'], low=ohlcv['Low'], close=ohlcv['Close'],
+        x=chart_df.index, open=chart_df['Open'], high=chart_df['High'], low=chart_df['Low'], close=chart_df['Close'],
         name='일봉', increasing_line_color='red', decreasing_line_color='blue'
     )
     fig.add_trace(candle)
 
     colors = {'MA5': 'green', 'MA20': 'orange', 'MA60': 'purple', 'MA120': 'gray'}
     for ma, color in colors.items():
-        line_trace = go.Scatter(x=ohlcv.index, y=ohlcv[ma], mode='lines', name=ma, line=dict(color=color, width=1.5))
+        line_trace = go.Scatter(x=chart_df.index, y=chart_df[ma], mode='lines', name=ma, line=dict(color=color, width=1.5))
         fig.add_trace(line_trace)
 
-    hammers = ohlcv[ohlcv['Hammer']]
+    hammers = chart_df[chart_df['Hammer']]
     hammer_trace = go.Scatter(
         x=hammers.index, y=hammers['Low'] * 0.98, mode='markers',
         name='바닥지지(망치형)', marker=dict(symbol='triangle-up', size=11, color='green')
     )
     fig.add_trace(hammer_trace)
 
-    surges = ohlcv[ohlcv['Gap_Surge']]
+    surges = chart_df[chart_df['Gap_Surge']]
     surge_trace = go.Scatter(
         x=surges.index, y=surges['Low'] * 0.96, mode='markers',
         name='수급돌파 신호', marker=dict(symbol='triangle-up', size=14, color='red')
@@ -524,6 +590,20 @@ with st.sidebar:
     else:
         dart_api_key = st.text_input("OpenDART API Key", type="password")
 
+# [신규] 상단 코스피 시장 온도계 배너
+kospi_temp = get_kospi_temperature()
+if kospi_temp:
+    diff = kospi_temp['diff_pct']
+    curr_ks = kospi_temp['curr']
+    chg_r = kospi_temp.get('chg_ratio', 0.0)
+    header_txt = f"🌡️ **오늘의 코스피 실시간 지수 ({curr_ks:,.2f}pt, {chg_r:+.2f}%)"
+    if diff <= -3.0:
+        st.info(f"{header_txt}: [저평가 침체 구간]** — 3개월 평균보다 {abs(diff):.1f}% 낮아 우량주를 천천히 모아가기 좋은 시기입니다.")
+    elif diff >= 5.0:
+        st.warning(f"{header_txt}: [단기 과열 구간]** — 3개월 평균보다 {diff:.1f}% 높아 추격 매수를 자제하세요.")
+    else:
+        st.success(f"{header_txt}: [적정 안정 구간]** — 시장이 큰 무리 없이 정상 범위에서 움직이고 있습니다.")
+
 # 메인 화면 탭
 tab1, tab2 = st.tabs(["⚡ 오늘의 상승주 & 안전 진단", "🔍 원하는 종목 직접 검색"])
 
@@ -539,7 +619,6 @@ with tab1:
     if df_board.empty:
         st.warning("현재 시장 데이터를 불러오지 못했습니다. 잠시 후 다시 시도하거나 두 번째 탭에서 직접 검색해 주세요.")
     else:
-        # 상단 요약 표
         st.dataframe(
             df_board[['종목명', '안전판정', '현재가', '등락률', '큰손수급(5일)', 'PER/PBR', '진단요약']],
             use_container_width=True,
@@ -547,7 +626,6 @@ with tab1:
             height=420
         )
 
-        # 아버지가 바로 누를 수 있는 원클릭 종목 카드 버튼 (3열 그리드)
         st.markdown("#### 👆 자세히 볼 주식 이름을 바로 눌러주세요")
         state_key = f"selected_ticker_{market_sel}"
         if state_key not in st.session_state or st.session_state[state_key] not in df_board['종목코드'].values:
@@ -567,7 +645,6 @@ with tab1:
                 st.session_state[state_key] = row['종목코드']
                 st.rerun()
 
-        # 선택된 종목 상세 진단 즉시 출력
         sel_row = df_board[df_board['종목코드'] == st.session_state[state_key]].iloc[0]
         render_stock_analysis(sel_row['종목코드'], sel_row['종목명'], dart_api_key, tab_id="rising_board")
 
