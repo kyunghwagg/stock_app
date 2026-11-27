@@ -40,26 +40,16 @@ def is_pure_common_stock(code, name):
         return False
     return True
 
-<<<<<<< HEAD
-# 0. [실시간 개선] 코스피 시장 온도계 (네이버 모바일 실시간 지수 + 60일 이평선 비교)
+# 0. 코스피 시장 온도계 (네이버 모바일 실시간 지수 + 60일 이평선 비교)
 @st.cache_data(ttl=300)
 def get_kospi_temperature():
     try:
-        # 1) 60일 이동평균선 계산용 과거 일봉
-=======
-# 0. [신규] 코스피 시장 온도계 (전체 시장 과열/침체 여부 1줄 요약)
-@st.cache_data(ttl=1800)
-def get_kospi_temperature():
-    try:
->>>>>>> e7b173ff422f64e9ad58cfc4c5e4f0a7ef2c326c
         end_dt = datetime.today()
         start_dt = end_dt - timedelta(days=150)
         df_ks = fdr.DataReader("KS11", start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
         if df_ks.empty or len(df_ks) < 60:
             return None
-<<<<<<< HEAD
 
-        # 2) 실시간 현재 지수 (네이버 증권 모바일 API)
         curr = float(df_ks['Close'].iloc[-1])
         chg_ratio = 0.0
         try:
@@ -72,17 +62,10 @@ def get_kospi_temperature():
         except Exception:
             pass
 
-        # 최근 59일 종가 + 실시간 현재 지수로 60일 평균 계산
         recent_59 = df_ks['Close'].iloc[-59:].tolist()
         ma60 = (sum(recent_59) + curr) / len(recent_59 + [curr])
         diff_pct = (curr - ma60) / ma60 * 100
         return {"curr": curr, "diff_pct": diff_pct, "chg_ratio": chg_ratio}
-=======
-        curr = float(df_ks['Close'].iloc[-1])
-        ma60 = float(df_ks['Close'].rolling(60).mean().iloc[-1])
-        diff_pct = (curr - ma60) / ma60 * 100
-        return {"curr": curr, "diff_pct": diff_pct}
->>>>>>> e7b173ff422f64e9ad58cfc4c5e4f0a7ef2c326c
     except Exception:
         return None
 
@@ -324,7 +307,6 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
             is_profitable = (dart_res["status"] == "success" and dart_res['curr_op'] > 0)
             op_growth = dart_res.get('op_growth', 0) if dart_res["status"] == "success" else 0
 
-            # 가치·성장주 저평가 판정 (PBR 저평가 OR 고성장·저PER)
             is_value_good = (0 < pbr_val <= 1.3) or (op_growth >= 30 and 0 < per_val <= 20)
 
             if is_deficit:
@@ -385,14 +367,14 @@ def get_rising_stocks_board(dart_api_key, market="KOSPI"):
 
     return pd.DataFrame(combined).drop(columns=["_priority", "_chg"]), bday
 
-# 8. 상세 진단 화면 렌더링 (1년 주가 위치 밴드 + 성장주 PER 평가 반영)
+# 8. 상세 진단 화면 렌더링
 def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     fund_data, _ = get_single_fundamental(ticker)
     supply = get_investor_supply(ticker)
     dart_res = check_dart_performance(dart_api_key, ticker)
 
     end_dt = datetime.today()
-    start_dt = end_dt - timedelta(days=365)  # 1년(52주) 주가 범위 계산을 위해 365일 조회
+    start_dt = end_dt - timedelta(days=365)
     try:
         ohlcv = fdr.DataReader(ticker, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
     except Exception:
@@ -416,7 +398,6 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
             st.info(f"📊 최근 실적({dart_res['period']}): 영업이익 {dart_res['curr_op']/100_000_000:,.1f}억 원 ({dart_res['op_growth']:+.1f}%)")
         return
 
-    # 1년(52주) 주가 밴드 위치 계산 (하단 0% ~ 상단 100%)
     year_high = float(ohlcv['High'].max())
     year_low = float(ohlcv['Low'].min())
     curr_price = float(latest['Close'])
@@ -426,7 +407,6 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
         band_pct = 50
     band_pct = max(0, min(100, band_pct))
 
-    # 차트 렌더링용 최근 180거래일 슬라이싱
     chart_df = ohlcv.tail(180).copy()
     for ma in [5, 20, 60, 120]:
         chart_df[f'MA{ma}'] = ohlcv['Close'].rolling(window=ma).mean().tail(180)
@@ -473,7 +453,6 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     pbr_val = fund_data.get('PBR', 0) if fund_data else 0
     per_val = fund_data.get('PER', 0) if fund_data else 0
 
-    # 업종별 가치 판단: PBR 저평가 OR 고성장+합리적 PER 구제
     if 0 < pbr_val <= 1.3:
         is_undervalued = True
         fund_reasons.append(f"✅ 자산 대비 저평가 (PBR {pbr_val:.2f}배)")
@@ -544,7 +523,6 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     m3.metric("PER (주가수익비율)", f"{per_val:.1f} 배" if per_val > 0 else "-")
     m4.metric("PBR (1이하면 저평가)", f"{pbr_val:.2f} 배" if pbr_val > 0 else "-")
 
-    # [신규] 1년 주가 위치 밴드 게이지 (적정가 하단~상단 위치 시각화)
     if band_pct <= 25:
         band_msg = f"🟢 **1년 범위 중 하위 {band_pct}% (바닥권·저평가 구간)** — 1년 최저가({int(year_low):,}원) 부근입니다."
     elif band_pct >= 80:
@@ -554,7 +532,6 @@ def render_stock_analysis(ticker, stock_name, dart_api_key, tab_id="main"):
     st.markdown(f"📏 **1년 주가 위치:** {band_msg}")
     st.progress(band_pct / 100)
 
-    # 일봉 + 이동평균선 차트
     fig = go.Figure()
     candle = go.Candlestick(
         x=chart_df.index, open=chart_df['Open'], high=chart_df['High'], low=chart_df['Low'], close=chart_df['Close'],
@@ -604,12 +581,11 @@ with st.sidebar:
     else:
         dart_api_key = st.text_input("OpenDART API Key", type="password")
 
-# [신규] 상단 코스피 시장 온도계 배너
+# 상단 코스피 실시간 시장 온도계 배너
 kospi_temp = get_kospi_temperature()
 if kospi_temp:
     diff = kospi_temp['diff_pct']
     curr_ks = kospi_temp['curr']
-<<<<<<< HEAD
     chg_r = kospi_temp.get('chg_ratio', 0.0)
     header_txt = f"🌡️ **오늘의 코스피 실시간 지수 ({curr_ks:,.2f}pt, {chg_r:+.2f}%)"
     if diff <= -3.0:
@@ -618,14 +594,6 @@ if kospi_temp:
         st.warning(f"{header_txt}: [단기 과열 구간]** — 3개월 평균보다 {diff:.1f}% 높아 추격 매수를 자제하세요.")
     else:
         st.success(f"{header_txt}: [적정 안정 구간]** — 시장이 큰 무리 없이 정상 범위에서 움직이고 있습니다.")
-=======
-    if diff <= -3.0:
-        st.info(f"🌡️ **오늘의 코스피 시장 온도 ({curr_ks:,.0f}pt): [저평가 침체 구간]** — 3개월 평균보다 {abs(diff):.1f}% 낮아 우량주를 천천히 모아가기 좋은 시기입니다.")
-    elif diff >= 5.0:
-        st.warning(f"🌡️ **오늘의 코스피 시장 온도 ({curr_ks:,.0f}pt): [단기 과열 구간]** — 3개월 평균보다 {diff:.1f}% 높아 추격 매수를 자제하세요.")
-    else:
-        st.success(f"🌡️ **오늘의 코스피 시장 온도 ({curr_ks:,.0f}pt): [적정 안정 구간]** — 시장이 큰 무리 없이 정상 범위에서 움직이고 있습니다.")
->>>>>>> e7b173ff422f64e9ad58cfc4c5e4f0a7ef2c326c
 
 # 메인 화면 탭
 tab1, tab2 = st.tabs(["⚡ 오늘의 상승주 & 안전 진단", "🔍 원하는 종목 직접 검색"])
